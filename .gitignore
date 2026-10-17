@@ -1,0 +1,19 @@
+# 厂商发行物绝不进 git：体积大、可从公开渠道重新获取
+*.whl
+*.pdf
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# macOS
+.DS_Store
+
+# 从发行物解包出来的第三方包与本地数据根
+build/
+
+# 本地凭据与探测报文（线上回包可能含账号信息）
+.env
+logs/

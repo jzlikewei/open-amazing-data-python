@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # tgwpy 是纯 Python。3.11 与 3.13 都是正式跑，不是探警。
+        python-version: ["3.11", "3.13"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: 装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # 发行物（wheel）不在本仓，所以 49 条需要业务层的测试会跳过，
+      # 实际跑 726 条。跳过数不符就说明 skip 守卫被人动过。
+      #
+      # 「视图手改就红」由 tests/test_skill_contract.py 里那条
+      # 字节级比对覆盖（它 import 的是包内的 tgwpy.gen_skill_caps），
+      # 所以**不需要**再单跑一次 gen_skill_caps --check——
+      # 那条命令依赖反编译工具链目录，而它不进公开仓。
+      # 公开仓的 CI 只跑 pytest。
+      - name: 跑测试
+        run: python -m pytest tests/ -q -rs
+
+      - name: 导入冒烟（公开副本必须自洽，不依赖本仓之外的任何东西）
+        run: |
+          python -c "import src.tgwpy.cli, src.tgwpy.batch, src.tgwpy.guard; print('ok')"

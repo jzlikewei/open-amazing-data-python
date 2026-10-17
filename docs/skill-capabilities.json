@@ -1,0 +1,1025 @@
+{
+  "$comment": [
+    "SSOT：/amazingdata skill 对外承诺的 39 个查询/下载能力。",
+    "本文件是本仓对外方法契约的事实源，视图见 docs/skill-capabilities.md，",
+    "status 的含义（每一条都必须可证伪，见 tests/test_skill_contract.py）：",
+    "  verified     真实网关实测过，返回真实数据",
+    "  unverified   代码已写完，用抓包原文 + 真业务层转换验证过，但没跑过真实网关",
+    "  param_bizerr 协议通、服务端回业务错误，样例参数不对（不是实现问题）",
+    "  impl_stub    底层 compat 调用是 stub，代码还没写",
+    "  untested     从未测过",
+    "  verified     真实网关实测过，返回真实数据",
+    "  param_bizerr 协议通、服务端回业务错误，样例参数不对（不是实现问题）",
+    "  impl_stub    底层 compat 调用是 stub，代码还没写",
+    "  untested     从未测过",
+    "",
+    "改这边就要改 src/tgwpy/cli.py 的 CATEGORIES，测试会对账。",
+    "剩下的 unverified 与 bizerr 按「谁能解决」分四类，见 blockers_doc，整理成可直接转给银河的清单。"
+  ],
+  "output_contracts": {
+    "code_list": "字符串数组",
+    "code_info": "{type: [records...]}",
+    "default": "{code: [records...]}"
+  },
+  "capabilities": [
+    {
+      "category": "base",
+      "method": "code_list",
+      "title": "代码表（每日最新）",
+      "options": [
+        "type"
+      ],
+      "output": "code_list",
+      "status": "unverified",
+      "calls": [
+        "QueryThirdInfo",
+        "QuerySecuritiesInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010010011"
+      ],
+      "gap": "协议已按抓包原文实现，请求字节与线上报文逐字段相等（有回归测试）。**但真实网关实测该 method 恒回 status=-82（kFlowOverLimit）**，官方 SDK 发同样报文也回 -82，7 种 security_type 的报文逐字节相同——属服务端侧限制，未取到数据。所以状态是 unverified 而不是 verified。"
+    },
+    {
+      "category": "base",
+      "method": "code_info",
+      "title": "证券信息（简称、昨收、涨跌停价）",
+      "options": [
+        "type"
+      ],
+      "output": "code_info",
+      "status": "unverified",
+      "calls": [
+        "QuerySecuritiesInfo"
+      ],
+      "entry_call": "QuerySecuritiesInfo",
+      "function_ids": [],
+      "gap": "协议已按抓包原文实现，请求字节与线上报文逐字段相等（有回归测试）。**但真实网关实测该 method 恒回 status=-82（kFlowOverLimit）**，官方 SDK 发同样报文也回 -82，7 种 security_type 的报文逐字节相同——属服务端侧限制，未取到数据。所以状态是 unverified 而不是 verified。"
+    },
+    {
+      "category": "base",
+      "method": "calendar",
+      "title": "交易日历",
+      "options": [
+        "market"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010061003"
+      ],
+      "gap": null,
+      "evidence": "2026-10-11 实跑：分段拼出 8738 个交易日（1990-12-19 ~ 2026-10-09），3.2 秒；进程内 + 磁盘两级缓存生效，跨进程不再重拼"
+    },
+    {
+      "category": "base",
+      "method": "stock_basic",
+      "title": "上市公司基础信息",
+      "options": [
+        "codes"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010010001"
+      ],
+      "gap": null
+    },
+    {
+      "category": "base",
+      "method": "future_codes",
+      "title": "期货代码表",
+      "options": [
+        "type"
+      ],
+      "output": "code_info",
+      "status": "unverified",
+      "calls": [
+        "QuerySecuritiesInfo"
+      ],
+      "entry_call": "QuerySecuritiesInfo",
+      "function_ids": [],
+      "gap": "协议已按抓包原文实现，请求字节与线上报文逐字段相等（有回归测试）。**但真实网关实测该 method 恒回 status=-82（kFlowOverLimit）**，官方 SDK 发同样报文也回 -82，7 种 security_type 的报文逐字节相同——属服务端侧限制，未取到数据。所以状态是 unverified 而不是 verified。"
+    },
+    {
+      "category": "base",
+      "method": "option_codes",
+      "title": "期权代码表",
+      "options": [
+        "type"
+      ],
+      "output": "code_info",
+      "status": "unverified",
+      "calls": [
+        "QuerySecuritiesInfo"
+      ],
+      "entry_call": "QuerySecuritiesInfo",
+      "function_ids": [],
+      "gap": "协议已按抓包原文实现，请求字节与线上报文逐字段相等（有回归测试）。**但真实网关实测该 method 恒回 status=-82（kFlowOverLimit）**，官方 SDK 发同样报文也回 -82，7 种 security_type 的报文逐字节相同——属服务端侧限制，未取到数据。所以状态是 unverified 而不是 verified。"
+    },
+    {
+      "category": "base",
+      "method": "history_status",
+      "title": "历史证券信息",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010060002",
+        "A010060005"
+      ],
+      "gap": null,
+      "evidence": "2026-10-11 实跑：30 只 × 2026-09-30 对生产库，is_st/is_xr/is_suspended/is_withdrawn 四项零差零缺"
+    },
+    {
+      "category": "base",
+      "method": "bj_code_mapping",
+      "title": "北交所新旧代码对照",
+      "options": [],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010010010"
+      ],
+      "gap": null
+    },
+    {
+      "category": "market",
+      "method": "kline",
+      "title": "历史 K 线",
+      "options": [
+        "codes",
+        "begin",
+        "end",
+        "period",
+        "adjust"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryKline"
+      ],
+      "entry_call": "QueryKline",
+      "function_ids": [],
+      "gap": null,
+      "evidence": "2026-10-11 实跑：30 只 × 2026-09-30 不复权日线对生产库逐字段 180 值零差；ETF 159915.SZ/510050.SH 12 值零差；`--period min1` 单日 242 根、242 个不同时间戳、09:30 开盘到 15:00 收盘；`--adjust qfq` 600519.SH 2026-04-20 收 1378.274611；分批入口 120 只分 4 批全通，续跑跳过已完成批"
+    },
+    {
+      "category": "market",
+      "method": "snapshot",
+      "title": "历史快照（Level-1 行情）",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QuerySnapshot"
+      ],
+      "entry_call": "QuerySnapshot",
+      "function_ids": [],
+      "gap": null,
+      "evidence": "2026-10-11 实跑 `market snapshot --codes 600519.SH --begin 20260930`：exit 0，stdout 纯 JSON，35 字段；`pre_close`=1235.58 与库内 2026-09-29 收盘一致，涨跌停 1112.02/1359.14 等于 ±10%"
+    },
+    {
+      "category": "finance",
+      "method": "balance_sheet",
+      "title": "资产负债表",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010050001"
+      ],
+      "gap": null
+    },
+    {
+      "category": "finance",
+      "method": "income",
+      "title": "利润表",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010050002"
+      ],
+      "gap": null
+    },
+    {
+      "category": "finance",
+      "method": "cash_flow",
+      "title": "现金流量表",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010050003"
+      ],
+      "gap": null
+    },
+    {
+      "category": "finance",
+      "method": "profit_express",
+      "title": "业绩快报",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010050007"
+      ],
+      "gap": null
+    },
+    {
+      "category": "finance",
+      "method": "profit_notice",
+      "title": "业绩预告",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010050005"
+      ],
+      "gap": null
+    },
+    {
+      "category": "shareholder",
+      "method": "top10",
+      "title": "十大股东数据",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010040001"
+      ],
+      "gap": null
+    },
+    {
+      "category": "shareholder",
+      "method": "holder_num",
+      "title": "股东户数",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010040005"
+      ],
+      "gap": null
+    },
+    {
+      "category": "shareholder",
+      "method": "equity_structure",
+      "title": "股本结构（总股本/流通股/限售股）",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010010004"
+      ],
+      "gap": null
+    },
+    {
+      "category": "shareholder",
+      "method": "pledge_freeze",
+      "title": "股权冻结/质押",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010040004"
+      ],
+      "gap": null
+    },
+    {
+      "category": "shareholder",
+      "method": "restricted",
+      "title": "限售股解禁",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010040003"
+      ],
+      "gap": null
+    },
+    {
+      "category": "shareholder",
+      "method": "dividend",
+      "title": "分红数据",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010030001"
+      ],
+      "gap": null
+    },
+    {
+      "category": "shareholder",
+      "method": "right_issue",
+      "title": "配股数据",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010030002"
+      ],
+      "gap": null
+    },
+    {
+      "category": "index",
+      "method": "constituent",
+      "title": "指数成分股",
+      "options": [
+        "codes"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010200002"
+      ],
+      "gap": null
+    },
+    {
+      "category": "index",
+      "method": "weight",
+      "title": "指数成分股日权重",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010200005"
+      ],
+      "gap": null
+    },
+    {
+      "category": "index",
+      "method": "industry_info",
+      "title": "行业指数基本信息",
+      "options": [],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010200006"
+      ],
+      "gap": null
+    },
+    {
+      "category": "index",
+      "method": "industry_constituent",
+      "title": "行业指数成分股",
+      "options": [
+        "codes"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010200003"
+      ],
+      "gap": null
+    },
+    {
+      "category": "index",
+      "method": "industry_weight",
+      "title": "行业指数成分股日权重",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010200008"
+      ],
+      "gap": null
+    },
+    {
+      "category": "index",
+      "method": "industry_daily",
+      "title": "行业指数日行情",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010200007"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "margin_summary",
+      "title": "融资融券成交汇总",
+      "options": [
+        "date"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010080002"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "margin_detail",
+      "title": "融资融券交易明细",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010080001"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "long_hu_bang",
+      "title": "龙虎榜",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010070002"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "block_trading",
+      "title": "大宗交易",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010070001"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "etf_pcf",
+      "title": "ETF 申赎和成分股",
+      "options": [
+        "codes"
+      ],
+      "output": "default",
+      "status": "unverified",
+      "calls": [
+        "QueryETFInfo"
+      ],
+      "entry_call": "QueryETFInfo",
+      "function_ids": [],
+      "gap": "协议已按抓包原文实现（线上 method 是 ReqGetETFCodeTableList，不是 QueryETFInfo，照 SDK 名发会静默失败）。**但真实网关实测恒回 status=-82**，属服务端侧限制，未取到数据。另外 [信息表,成分表] 的分帧规则是推断，未验证。"
+    },
+    {
+      "category": "other",
+      "method": "fund_share",
+      "title": "ETF 基金份额",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010090002"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "fund_iopv",
+      "title": "ETF 收盘 IOPV",
+      "options": [
+        "codes",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010090003"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "treasury_yield",
+      "title": "国债收益率",
+      "options": [
+        "terms",
+        "begin",
+        "end"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010050009"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "option_basic_info",
+      "title": "期权基本资料",
+      "options": [
+        "codes"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010500001"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "kzz_issuance",
+      "title": "可转债发行数据",
+      "options": [
+        "codes"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010400008"
+      ],
+      "gap": null
+    },
+    {
+      "category": "other",
+      "method": "kzz_conv",
+      "title": "可转债转股数据",
+      "options": [
+        "codes"
+      ],
+      "output": "default",
+      "status": "verified",
+      "calls": [
+        "QueryThirdInfo"
+      ],
+      "entry_call": "QueryThirdInfo",
+      "function_ids": [
+        "A010400003"
+      ],
+      "gap": null
+    }
+  ],
+  "execution": {
+    "$comment": [
+      "执行清单。cron 的唯一需求来源就是本文件的 execution 段。",
+      "按依赖分层：下层没关，上层不许关。Director 每次 tick 只做最细的未完成层。",
+      "done 由 Director 在验收门禁全过之后改 true，改完必须同批更新 status 字段与 md 视图。",
+      "gate 是硬门禁，达不到就不许勾。"
+    ],
+    "gate_rules": [
+      "可运行：CLI 能真实启动并接上真实网关，不是 stub 返回",
+      "端到端：输入 → 运行 → 结果 → 证据链完整，stdout 只有 JSON",
+      "禁止伪造：不得用 mock 数据、假成功响应冒充通过",
+      "验证日志：记录真实跑过的命令与实际输出摘要",
+      "文档一致：同批更新本文件的 status/gap 与 skill-capabilities.md 视图",
+      "提交姿态：code-first，纯测试或纯文档批次不作为 checkpoint"
+    ],
+    "layers": [
+      {
+        "id": "L0",
+        "name": "传输层：compat 替身落地",
+        "why": "compat 里 4 个调用还是 _unimplemented 桩，直接压住 7 个能力。协议参数和响应解码在 2026-10-10 已用 MITM 抓参照 SDK 实测确认，这里只差把桩换成真实现并把行情请求接到 /amd/dgw/dgw 通道。",
+        "items": [
+          {
+            "id": "L0.1",
+            "done": true,
+            "title": "实现 compat.QueryKline，接通 market.kline",
+            "unblocks": [
+              "market.kline"
+            ],
+            "gate": [
+              "compat.QueryKline 不再调 _unimplemented",
+              "请求走 PATH_MARKET（/amd/dgw/dgw），period_type 用 10100 档",
+              "响应按 decode_kline_rows 还原成 {code: [records...]}",
+              "用真实网关跑通，把命令与输出摘要记进提交信息",
+              "tests/test_skill_contract.py 里 market.kline 的 status 从 impl_stub 转 verified"
+            ],
+            "type": "unblock",
+            "evidence": "协议/解码 2026-10-10 抓包实证；传输层 2026-10-11 真实网关端到端：单连接 /amd/dgw/dgw，kline 5 条、snapshot 5432 条，数值与参照实现逐项相等。"
+          },
+          {
+            "id": "L0.2",
+            "done": true,
+            "title": "实现 compat.QuerySnapshot，接通 market.snapshot",
+            "unblocks": [
+              "market.snapshot"
+            ],
+            "gate": [
+              "compat.QuerySnapshot 不再调 _unimplemented",
+              "begin_time/end_time 用 90000000/170000000，不是 K 线的 900/1700",
+              "多帧按 headers.all_pack_num 收齐（实测单日 4 帧 5432 行）",
+              "真实网关跑通并记录证据",
+              "status 从 impl_stub 转 verified"
+            ],
+            "type": "unblock",
+            "evidence": "协议/解码 2026-10-10 抓包实证；传输层 2026-10-11 真实网关端到端：单连接 /amd/dgw/dgw，kline 5 条、snapshot 5432 条，数值与参照实现逐项相等。"
+          },
+          {
+            "id": "L0.3",
+            "done": true,
+            "title": "实现 compat.QuerySecuritiesInfo",
+            "unblocks": [
+              "base.code_info",
+              "base.future_codes",
+              "base.option_codes",
+              "base.code_list"
+            ],
+            "gate": [
+              "先用 MITM 抓参照 SDK 的真实报文确定 method 与 params，不能照 .rodata 猜",
+              "**照 SDK 方法名发会静默失败**：线上是 ReqGetCodeTableList / ReqGetETFCodeTableList",
+              "compat 里两个函数都不再调 _unimplemented",
+              "请求字节与抓包原文逐字段相等，有回归测试钉住",
+              "**若服务端恒回 -82，如实把 4+1 个能力标成 unverified 并写明是服务端侧限制，不许伪造成通过**"
+            ],
+            "type": "unblock",
+            "evidence": "exec/r2-secinfo 23d0a34。请求构造正确且有回归测试；真实网关恒回 -82，4 个能力标 unverified 而非 verified。门禁原文写的是「四个依赖方法同步转 verified」，该条在服务端限制下不可能达成，已按事实改写——达成的是「如实记为服务端侧限制」这一条。",
+            "server_limited": [
+              "base.code_info",
+              "base.future_codes",
+              "base.option_codes",
+              "base.code_list"
+            ],
+            "server_limited_why": "真实网关恒回 status=-82，官方 SDK 发同样报文也一样，属服务端侧限制。这些能力是 unverified 不是 verified，不是「没做」，是「做了但这条路走不通」。"
+          },
+          {
+            "id": "L0.4",
+            "done": true,
+            "title": "实现 compat.QueryETFInfo",
+            "unblocks": [
+              "other.etf_pcf"
+            ],
+            "gate": [
+              "先抓参照 SDK 的 ETF 申赎请求确定 method 与 params",
+              "线上是 ReqGetETFCodeTableList，入参是**列表**不是单项（base_data.dis.txt:483-188）",
+              "compat.QueryETFInfo 不再调 _unimplemented",
+              "**若恒回 -82，如实标 unverified 并写明服务端侧限制**",
+              "ETF 的 [信息表,成分表] 分帧规则是推断，需在代码里标明未验证"
+            ],
+            "type": "unblock",
+            "evidence": "exec/r2-secinfo 23d0a34。线上 method 是 ReqGetETFCodeTableList；真实网关恒回 -82，etf_pcf 标 unverified。",
+            "server_limited": [
+              "other.etf_pcf"
+            ],
+            "server_limited_why": "真实网关恒回 status=-82，官方 SDK 发同样报文也一样，属服务端侧限制。这些能力是 unverified 不是 verified，不是「没做」，是「做了但这条路走不通」。"
+          },
+          {
+            "id": "L0.5",
+            "done": true,
+            "title": "定 ReqGetComplete 的触发条件（证据冲突，未定性）",
+            "unblocks": [],
+            "why": "抓包发现每个分页响应后 SDK 必发一条 ReqGetComplete；探针 A/B 显示不发就断连。但我们的 verify_function_ids.py 单连接连查 54 个、其中 4 个返回满 1000 条，后续仍全部 ok。两条实测互相矛盾，必须搞清楚再动手。",
+            "gate": [
+              "写一个最小复现：单连接、连发两个请求，第二个必然带 ReqGetComplete",
+              "去掉它，观察是立刻断连还是延迟断、还是根本不���",
+              "若确为必需：client.query 要在收满一页后补发，并补 offset 翻页",
+              "补测试覆盖「整页响应后续查」这个场景",
+              "结论写进代码注释，并更正任何与之冲突的旧记录"
+            ],
+            "type": "hardening",
+            "evidence": "r2-research 定性：ReqGetComplete 对连接生命周期无作用。6 组对照矩阵、14 次连续满页、忠实重放原失败场景（10 次满页 + 120s 空闲）全部存活。原 A/B 的断连来自手写探针自身缺陷。连带更正：网关从不做单响应分包，所有响应 all_pack_num=1。"
+          },
+          {
+            "id": "L0.6",
+            "done": true,
+            "type": "hardening",
+            "title": "传输层改成单连接单通道",
+            "unblocks": [],
+            "why": "真实网关实测：账号只允许一个会话。四种拓扑里只有「单连接走 /amd/dgw/dgw、自己登录一次」能通；两条连接无论第二次登录用 ForceLogout=0 还是 1 都回 status=-98，复用 token 则被服务端断连。已合并的双连接拓扑必须重做。",
+            "gate": [
+              "WssTransport 改成单连接，走 PATH_MARKET，登录一次供两族共用",
+              "34 个已实测的资讯 function_id 迁到该通道后仍要全部返回数据",
+              "同一条连接上「行情 → 资讯 → 行情」连打三次都要正常（已实测可行，需回归覆盖）",
+              "wire.py 的 _Channel 抽象按新拓扑收敛，别留双连接的死代码",
+              "补一条测试钉住「只登录一次」这条不变量"
+            ],
+            "evidence": "真实网关验收：单连接 /amd/dgw/dgw、ReqLogon 只发 1 次、行情→资讯→行情三连打正常、20 个资讯 function_id 回归全通、socket 全程未换。期间修掉一个真 bug：认证应答里的 token 没进 compat 会话，导致每条查询带空 token 回 -87。"
+          }
+        ]
+      },
+      {
+        "id": "L1",
+        "name": "参数层：样例参数不对的 10 个",
+        "why": "协议通、服务端回业务错误。多数是样例标的选错，少数（如 equity_structure）该数据确定存在却报错，是真参数问题。本层依赖 L0.3 提供 option_codes 的真实码。",
+        "items": [
+          {
+            "id": "L1.1",
+            "done": true,
+            "depends_on": [
+              "L0.3"
+            ],
+            "title": "行业类 3 个：喂对行业指数码",
+            "unblocks": [
+              "index.industry_constituent",
+              "index.industry_weight",
+              "index.industry_daily"
+            ],
+            "gate": [
+              "从已验证的 A010200006（industry_info）取真实行业指数码",
+              "三个接口都返回真实数据",
+              "把可用的行业码样例记进提交信息"
+            ],
+            "type": "unblock",
+            "evidence": "r2-research 7392628：11 条样例参数在真实网关上确认 status=0"
+          },
+          {
+            "id": "L1.2",
+            "done": true,
+            "depends_on": [
+              "L0.3"
+            ],
+            "title": "option_basic_info：用真期权码重测",
+            "unblocks": [
+              "other.option_basic_info"
+            ],
+            "gate": [
+              "样例标的从 600519.SH 换成真实期权合约码",
+              "返回真实数据；仍失败则记为服务端侧限制并写明证据"
+            ],
+            "type": "unblock",
+            "evidence": "r2-research 7392628：11 条样例参数在真实网关上确认 status=0"
+          },
+          {
+            "id": "L1.3",
+            "done": true,
+            "title": "equity_structure 与 pledge_freeze：茅台确定有数据却报错",
+            "unblocks": [
+              "shareholder.equity_structure",
+              "shareholder.pledge_freeze"
+            ],
+            "gate": [
+              "换多只标的、多个日期区间试，定位是字段名还是取值问题",
+              "若确属服务端限制，附上多标的复现记录再改状态"
+            ],
+            "type": "unblock",
+            "evidence": "r2-research 7392628：11 条样例参数在真实网关上确认 status=0"
+          },
+          {
+            "id": "L1.4",
+            "done": true,
+            "title": "restricted / right_issue / long_hu_bang / profit_express：换有数据的标的",
+            "unblocks": [
+              "shareholder.restricted",
+              "shareholder.right_issue",
+              "other.long_hu_bang",
+              "finance.profit_express"
+            ],
+            "gate": [
+              "各自选一只确定命中该类数据的标的（配股/限售/龙虎榜/快报）",
+              "返回真实数据；仍失败则记为服务端侧限制并写明证据"
+            ],
+            "type": "unblock",
+            "evidence": "r2-research 7392628：11 条样例参数在真实网关上确认 status=0"
+          }
+        ]
+      },
+      {
+        "id": "L2",
+        "name": "补测：从没测过的",
+        "why": "base.calendar 的 A010061003 压根不在 verify_function_ids.py 的 54 个样例里。",
+        "items": [
+          {
+            "id": "L2.1",
+            "done": true,
+            "title": "实测 A010061003 交易日历",
+            "unblocks": [
+              "base.calendar"
+            ],
+            "gate": [
+              "把 A010061003 的参数补齐并跑通",
+              "返回开市日期数组，与参照实现输出比对"
+            ],
+            "type": "unblock",
+            "evidence": "exec/l0-wire66 e858a9d：SSE/SZSE/NEEQ/CFFEX 四市场实测均返回真实数据，tag=11101，三列 TRADE_DAYS/EXCHANGE/EXCHANGE_INT"
+          }
+        ]
+      },
+      {
+        "id": "L1.5",
+        "name": "待验证疑点",
+        "why": "r4-exfactor 的 agent 从字节码推出「status 命中成功码会记进 error_list」，若成立则复权下载会一直重试后抛异常。但那段反编译读起来是反的（成功码记为错误），说明至少一处解读错了；且实测传 0 时 32 条数据完整回来、没有触发重试。要跑完整 cli.py → 业务层 → compat 链路才验得到，而 66 上只有 python3.10，load 不了 3.13 的 .pyc。",
+        "items": [
+          {
+            "id": "L1.5",
+            "done": false,
+            "type": "hardening",
+            "title": "验清 SPI 层怎么解读 deliver_response 的 status",
+            "unblocks": [],
+            "gate": [
+              "在能跑 3.13 业务层的机器上跑 `market kline --adjust qfq` 全链路",
+              "确认 BackwardFactorSpi 没有把成功响应记进 error_list",
+              "若确实有问题，按厂商 SPI 的真实约定改 deliver_response 的 status 取值",
+              "改完必须重跑行情/资讯两条已验证路径，不能只验复权"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "blockers_doc": "（随仓未发布，要点已内联进 README）"
+}
