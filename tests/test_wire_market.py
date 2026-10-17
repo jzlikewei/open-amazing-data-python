@@ -647,3 +647,40 @@ def test_logon_failure_does_not_pollute_the_session_token(transport):
                         -1, {"msg": "登录失败"})
     assert tm._SESSION.logged_in is False
     assert tm._SESSION.token != "SHOULD-NOT-STICK"
+
+
+# --- U3：空结果与暂时性错误不进停手计数 ------------------------------------
+
+
+def _error_frame(task_id: int, status: int, msg: str = "") -> bytes:
+    env: dict[str, Any] = {"headers": {"id": task_id}, "status": status, "data": ""}
+    if msg:
+        env["msg"] = msg
+    return wire_frame(env)
+
+
+@pytest.mark.parametrize("status,counted", [(-100, False), (-89, False), (-82, True)])
+def test_U3_只有真失败才进停手计数(transport, status, counted):
+    """-100 是「没数据」，-89 由调用方重试；两者都不该把整轮推向退出码 5。"""
+    rec = arm(77)
+    transport.send(b"q")
+    transport.gate.record_failure("之前的一次失败")
+    before = transport.gate.failures
+    transport.client._ws.feed(_error_frame(77, status))
+    _data, text = rec.wait()
+    assert f"status={status}" in text
+    if counted:
+        assert transport.gate.failures == before + 1
+    elif status == -100:
+        assert transport.gate.failures == 0, "空结果说明后端活着，清零"
+    else:
+        assert transport.gate.failures == before, "暂时性错误不加也不清"
+
+
+def test_U3_有msg时错误文本仍带status(transport):
+    """业务层只拿到这一串字，丢了码就分不出暂时性错误。"""
+    rec = arm(78)
+    transport.send(b"q")
+    transport.client._ws.feed(_error_frame(78, -89, msg="行情服务错误"))
+    _data, text = rec.wait()
+    assert "行情服务错误" in text and "status=-89" in text

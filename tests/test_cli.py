@@ -147,6 +147,9 @@ class _FakeAmazingData:
 
 
 @pytest.mark.skipif(not BUILD.is_dir(), reason="发行物未解包，解包成 build/ 后再验签名")
+# .pyc 是 CPython 3.13 字节码（magic 3571），别的解释器 marshal 不了它，
+# 不跳过的话 3.11 上 39 条全报「不在 .pyc 里」，看着像路由错了。
+@pytest.mark.skipif(sys.version_info[:2] != (3, 13), reason="厂商 .pyc 是 3.13 字节码")
 @pytest.mark.parametrize("category,method,spec", ALL_METHODS, ids=lambda v: getattr(v, "method", v))
 def test_分发的调用能绑上业务层真实签名(category, method, spec):
     """路由错了会在这里变成 TypeError，不用等真连上网关才发现。"""
@@ -560,6 +563,51 @@ def test_空代码表不拦():
 
     _check_codes(None)
     _check_codes([])
+
+
+# U5：后缀表按方法的代码域分。下游用 `.SI` 查行业成分 / 权重，期货是
+# `IF2512.CFE`（CLI 自己的 MARKETS 就写的 CFE）。
+
+@pytest.mark.parametrize("argv", [
+    ["index", "industry_constituent", "--codes", "801120.SI"],
+    ["index", "industry_weight", "--codes", "801120.SI"],
+    ["index", "constituent", "--codes", "000300.SH"],
+    ["market", "kline", "--codes", "IF2512.CFE", "--begin", "20251201", "--end", "20251205"],
+    ["market", "kline", "--codes", "510300.SH", "--begin", "20251201", "--end", "20251205"],
+    ["other", "fund_share", "--codes", "510300.SH"],
+])
+def test_U5_本方法认得的合法代码放行(argv):
+    spec, opts = cli.run(argv)
+    assert opts.codes
+
+
+@pytest.mark.parametrize("argv", [
+    ["other", "fund_share", "--codes", "510300"],
+    ["index", "industry_constituent", "--codes", "801120"],
+    # 行情一路不认 .SI：业务层 split_code 会抛「未知类型--SI」
+    ["market", "kline", "--codes", "801120.SI", "--begin", "20251201", "--end", "20251205"],
+    # 业务层不认 CFFEX，期货要写 CFE
+    ["market", "kline", "--codes", "IF2512.CFFEX", "--begin", "20251201", "--end", "20251205"],
+])
+def test_U5_裸码与本方法不认的后缀在解析阶段拒绝(argv):
+    with pytest.raises(cli.CliError):
+        cli.run(argv)
+
+
+def test_U5_行情后缀表与业务层一致():
+    from OpenAmazingData._codes import MARKET_BY_SUFFIX
+
+    assert cli.MARKET_SUFFIXES == frozenset(MARKET_BY_SUFFIX)
+
+
+def test_C01_参数错误不登录(monkeypatch):
+    """代码与区间错误在登录前就以退出码 2 返回，不占会话锁。"""
+    called = []
+    monkeypatch.setattr(cli, "load_amazingdata", lambda: called.append(1))
+    assert cli.main(["other", "fund_share", "--codes", "510300"]) == cli.EXIT_USAGE
+    assert cli.main(["market", "kline", "--codes", "600519.SH",
+                     "--begin", "20251205", "--end", "20251201"]) == cli.EXIT_USAGE
+    assert called == []
 
 
 # -- 复权缺因子要补下载，不能静默少给 ------------------------------

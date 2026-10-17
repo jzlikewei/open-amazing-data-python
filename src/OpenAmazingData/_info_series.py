@@ -299,7 +299,10 @@ def _download_weight(t: _Series, local_path: str, code_list: list, **kwargs) -> 
     for code in code_list:
         if code in fresh:
             merged = pd.concat([plan.local[code], _shape(t, fresh[code])]).drop_duplicates()
-            ordered = merged.sort_values("TRADE_DATE", ascending=False)
+            # 稳定排序：同一 TRADE_DATE 内保留拼接顺序。厂商用的是缺省的不稳定排序，
+            # 同日行序随 pandas 版本变（.pyc 自己在 2.3 / 3.0 下就不一样），自研包
+            # 不跟这个偶然性，门禁对同日行序也不作判据（capability_spec.TIE_UNORDERED）。
+            ordered = merged.sort_values("TRADE_DATE", ascending=False, kind="stable")
             result[code] = ordered
             if not ordered.empty and plan.begin is None:
                 # 厂商缺陷 V05：`sort_values` 的结果只放进返回值，落盘那行传的仍是
@@ -314,7 +317,7 @@ def _download_weight(t: _Series, local_path: str, code_list: list, **kwargs) -> 
         # 一张列按列清单齐全的空表。
         kept = plan.local[code]
         result[code] = (_shape(t, kept) if kept.empty
-                        else kept.sort_values("TRADE_DATE", ascending=False))
+                        else kept.sort_values("TRADE_DATE", ascending=False, kind="stable"))
     return result
 
 

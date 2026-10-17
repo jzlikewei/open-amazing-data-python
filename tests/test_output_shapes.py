@@ -350,7 +350,7 @@ class _FakeBase:
     def __init__(self, factors):
         self._factors = factors
 
-    def get_backward_factor(self, codes):
+    def get_backward_factor(self, codes, local_path=None, is_local=True):
         return self._factors
 
 
@@ -422,29 +422,72 @@ def test_前复权在末值那天等于原价():
     assert rows.iloc[1]["close"] == 1500.0, "末值那天的 qfq 价就是原价"
 
 
-# 缺陷 3：缺因子就抛错，整条命令炸掉
-def test_因子表里没有这只代码时跳过并告警(capsys):
-    """以前是 RuntimeFailure 抛出去（退出码 3，整条命令没输出），现在跳过 + 告警。"""
+# U2（下游集成方反馈）：复权有缺口时，缺省整次失败；--allow-partial 才交部分结果，
+# 而且绝不把未复权价混进复权结果。
+
+def test_U2_因子表里没有这只代码时整次失败():
     factors = _factor_table(codes=("000858.SZ",))
-    out = cli.apply_adjust(_FakeAD(factors), {"600519.SH": _kline()}, "qfq")
-    assert out == {}, "匹配不上的代码整只跳过"
-    assert "600519.SH" in capsys.readouterr().err
+    with pytest.raises(cli.AdjustIncomplete) as err:
+        cli.apply_adjust(_FakeAD(factors), {"600519.SH": _kline()}, "qfq")
+    assert "600519.SH" in str(err.value) and "--allow-partial" in str(err.value)
+    assert isinstance(err.value, cli.RuntimeFailure), "退出码沿用 3"
 
 
-def test_部分K线缺因子时原样保留(capsys):
-    times = ["2026-04-20", "2026-04-21"]        # 4/21 不在因子表的交易日里
-    out = cli.apply_adjust(_FakeAD(_factor_table()), {"600519.SH": _kline(times=times)},
-                           "qfq")
-    rows = out["600519.SH"]
-    assert rows.iloc[0]["close"] == 1378.274611
-    assert rows.iloc[1]["close"] == 1410.89, "缺因子的那根必须保持原价"
-    assert "缺复权因子" in capsys.readouterr().err
-
-
-def test_一根都匹配不上时跳过():
-    out = cli.apply_adjust(_FakeAD(_factor_table()), {"600519.SH": _kline(times=["1999-01-04"])},
-                           "qfq")
+def test_U2_允许部分结果时整只剔除并可数(capsys):
+    factors = _factor_table(codes=("000858.SZ",))
+    out = cli.apply_adjust(_FakeAD(factors), {"600519.SH": _kline()}, "qfq",
+                           allow_partial=True)
     assert out == {}
+    assert "剔除 1/1 只" in capsys.readouterr().err
+
+
+def test_U2_部分K线缺因子时整次失败并列出日期():
+    times = ["2026-04-20", "2026-04-21"]        # 4/21 不在因子表的交易日里
+    with pytest.raises(cli.AdjustIncomplete) as err:
+        cli.apply_adjust(_FakeAD(_factor_table()), {"600519.SH": _kline(times=times)}, "qfq")
+    assert "20260421" in str(err.value)
+
+
+def test_U2_允许部分结果时只剔除缺因子的行_不留未复权价(capsys):
+    times = ["2026-04-20", "2026-04-21"]
+    out = cli.apply_adjust(_FakeAD(_factor_table()), {"600519.SH": _kline(times=times)},
+                           "qfq", allow_partial=True)
+    rows = out["600519.SH"]
+    assert list(rows["close"]) == [1378.274611], "缺因子的那根剔除，不保留原价"
+    assert "1 根缺因子" in capsys.readouterr().err
+
+
+def test_U2_一根都匹配不上时整次失败():
+    with pytest.raises(cli.AdjustIncomplete):
+        cli.apply_adjust(_FakeAD(_factor_table()), {"600519.SH": _kline(times=["1999-01-04"])},
+                         "qfq")
+
+
+def test_U2_业务层没给K线的代码不算复权失败():
+    """`query_kline` 对没数据的代码给 None，那是「没有 K 线」，不是复权缺口。"""
+    out = cli.apply_adjust(_FakeAD(_factor_table()),
+                           {"600519.SH": _kline(), "000001.SZ": None}, "qfq")
+    assert out["000001.SZ"] is None
+    assert out["600519.SH"].iloc[0]["close"] == 1378.274611
+
+
+def test_U2_main以非0退出且stdout为空(monkeypatch, capsys):
+    """端到端：缺因子时 stdout 不出 JSON，退出码 3。"""
+    class _MD:
+        def query_kline(self, codes, begin, end, period):
+            return {"600519.SH": _kline(times=["2026-04-20", "2026-04-21"])}
+
+    ad = _FakeAD(_factor_table())
+    ad.constant = SimpleNamespace(Period=SimpleNamespace(day=SimpleNamespace(value=10100)))
+    monkeypatch.setattr(cli, "load_amazingdata", lambda **_k: ad)
+    monkeypatch.setattr(cli, "_market_data", lambda _ad, _end=None: _MD())
+    monkeypatch.setattr(cli, "release_session", lambda: None)
+    rc = cli.main(["market", "kline", "--codes", "600519.SH", "--begin", "20260420",
+                   "--end", "20260421", "--adjust", "qfq"])
+    captured = capsys.readouterr()
+    assert rc == cli.EXIT_RUNTIME
+    assert captured.out == ""
+    assert "20260421" in captured.err
 
 
 # 缺陷 4：因子表按 {code: DataFrame} 判断，实际是宽表 {code: Series}
@@ -488,14 +531,30 @@ def test_本地整表缺这只时先补下载再复权(capsys):
     assert "已按需补下载" not in capsys.readouterr().err, "补齐了就不该再报缺"
 
 
-def test_补下载仍拿不到就整只跳过并可数(capsys):
+def test_补下载仍拿不到就整次失败():
     fetched = _factor_table(codes=("000858.SZ",))
     base = _FakeLocalTable(local={}, fetched=fetched)
-    out = cli.apply_adjust(_FakeAD(None, base=base), {"600519.SH": _kline()}, "qfq")
-    assert out == {}
-    err = capsys.readouterr().err
-    assert "已按需补下载" in err and "600519.SH" in err
-    assert "复权未完成：1/1" in err, "补不回来也要有可数的汇总"
+    with pytest.raises(cli.AdjustIncomplete) as err:
+        cli.apply_adjust(_FakeAD(None, base=base), {"600519.SH": _kline()}, "qfq")
+    assert "600519.SH" in str(err.value)
+    assert [is_local for _c, is_local in base.calls] == [True, False], "先补下载才判定"
+
+
+def test_U1_因子表末日早于K线末日时现取一次(capsys):
+    """`--use-cache` 下 backward_factor.h5 只读不刷新：缓存之后的新交易日匹配不到因子。
+
+    表末日早于 K 线末日就用 `is_local=False` 现取，新日期用新因子算。
+    """
+    old = _factor_table()
+    old["600519.SH"] = old["600519.SH"].iloc[:-1]        # 末日停在 2026-04-20
+    base = _FakeLocalTable(local=old, fetched=_factor_table())
+    frame = _kline(times=["2026-04-20", "2026-06-26"])
+    frame["close"] = [1410.89, 1500.0]
+    out = cli.apply_adjust(_FakeAD(None, base=base), {"600519.SH": frame}, "hfq")
+    assert [is_local for _c, is_local in base.calls] == [True, False]
+    assert list(out["600519.SH"]["close"]) == [round(1410.89 * 8.446992, 6),
+                                               round(1500.0 * 8.646881, 6)]
+    assert "末日早于 K 线末日" in capsys.readouterr().err
 
 
 def test_取因子失败仍是运行期错误():
@@ -506,7 +565,7 @@ def test_取因子失败仍是运行期错误():
         def BaseData(self):
             base = _FakeBase({})
 
-            def _boom(codes):
+            def _boom(codes, **_kw):
                 raise OSError("网关不可达")
 
             base.get_backward_factor = _boom

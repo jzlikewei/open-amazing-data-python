@@ -208,6 +208,8 @@ def _batch_namespace(plan: BatchPlan, spec: Any, batch: list[str]) -> argparse.N
         else:
             # 缺省值从 CLI 的 parser 拿，保证两边的默认行为一模一样。
             fields[name] = plan.options.get(name)
+    # 不在方法契约里、但每个方法都有的开关（cli.build_parser 统一加的）
+    fields["use_cache"] = bool(plan.options.get("use_cache", False))
     return argparse.Namespace(**fields)
 
 

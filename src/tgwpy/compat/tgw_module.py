@@ -48,6 +48,7 @@ Spi 的 `argcount=3, varnames=('self','data','status')` 一致。它对两个入
 from __future__ import annotations
 
 import json
+import os
 
 import sys
 import threading
@@ -163,6 +164,37 @@ NO_RESPONSE = (
 # --- 会话状态 ---------------------------------------------------------------
 
 
+#: 资讯族翻到第几页还没完就判失败。1000 行一页，200 页是 20 万行——单只代码
+#: 单个接口远到不了，到了多半是服务端在原地打转。`TGW_INFO_MAX_PAGES` 覆盖。
+DEFAULT_INFO_MAX_PAGES = 200
+
+
+class _Pager:
+    """`ReqGetThirdInfo` 的 offset 翻页（U4）。
+
+    请求里的 `count` 缺省 1000（原生库 `query_404280.c:269` 的缺省值），服务端
+    单次最多回 `count` 行，「还有下一页」只由「本页行数 == count」隐式表达，
+    没有续页标志（2026-10-11 网关调研 R1 探针实测：日历 offset
+    0/1000/2000 三页 8738 行无缺口无重复）。厂商原生库只发一页——满 1000 行的
+    结果被**静默截断**（沪深 300 成分全历史恒回 1000 行）。
+
+    这里在替身层翻页：满页就把 offset 推进一页再发，直到短页；拼好后才交给
+    业务层，业务层看到的仍是一次请求、一次回调。两种情况明确失败，不交截断的
+    结果：后一页与前一页内容完全相同（服务端忽略了 offset），页数超上限。
+    满页之后紧跟一页空结果（`status=-100`）算正常结束。
+    """
+
+    def __init__(self, count: int, offset: int) -> None:
+        self.count = count
+        self.offset = offset
+        self.pages: list[list] = []
+        self.seen: set[str] = set()
+        self.max_pages = int(os.environ.get("TGW_INFO_MAX_PAGES") or DEFAULT_INFO_MAX_PAGES)
+
+    def rows(self) -> list:
+        return [row for page in self.pages for row in page]
+
+
 class _Task:
     """一个在途查询：暂存的参数、认领它的回调、编码好的待发字节。
 
@@ -172,7 +204,7 @@ class _Task:
     """
 
     __slots__ = ("task_id", "params", "callback", "return_df_format", "wire_bytes",
-                 "transform", "explain_status")
+                 "transform", "explain_status", "pager")
 
     def __init__(self, task_id: int) -> None:
         self.task_id = task_id
@@ -182,6 +214,8 @@ class _Task:
         self.wire_bytes: bytes | None = None
         self.transform: Callable[[Any], Any] | None = None
         self.explain_status: Callable[[str], str] | None = None
+        #: 资讯族的翻页状态（`_Pager`）。行情族为 None。
+        self.pager: _Pager | None = None
 
 
 class Session:
@@ -609,6 +643,10 @@ def deliver_response(task_id: int, data, status=None) -> None:
             LogLevel.kWarn, f"收到 task_id={task_id} 的响应，任务表里没有它，丢弃"
         )
         return
+    if task.pager is not None:
+        data, status, more = _next_page(task, data, status)
+        if more:
+            return
     if task.transform is not None and data is not None:
         # `data is None` 一律是失败信号（`_reject` 走的就是这条路），
         # 别拿整形器去处理它——那会把「失败原因」盖成「整形异常」。
@@ -624,6 +662,64 @@ def deliver_response(task_id: int, data, status=None) -> None:
         # 不经过查询入口的代码，钩子挂在入口上就漏掉了。
         status = task.explain_status(status)
     _invoke(task, data, status)
+
+
+def _is_empty_status(status) -> bool:
+    text = str(status)
+    return "-100" in text or "DataEmpty" in text
+
+
+def _next_page(task: _Task, data, status) -> tuple[Any, Any, bool]:
+    """处理一页资讯回包。返回 `(交给业务层的 data, status, 是否已发下一页)`。"""
+    import hashlib
+    import json as _json
+
+    pager = task.pager
+    assert pager is not None
+    if status:
+        if pager.pages and _is_empty_status(status):
+            return pager.rows(), None, False      # 满页之后是空页：正好取完
+        if pager.pages:
+            status = f"{status}（第 {len(pager.pages) + 1} 页失败，前 {len(pager.pages)} 页作废）"
+        return None, status, False
+    page = list(data) if isinstance(data, (list, tuple)) else data
+    if not isinstance(page, list):
+        return data, status, False
+    fingerprint = hashlib.sha256(
+        _json.dumps(page, ensure_ascii=False, sort_keys=True, default=str).encode()
+    ).hexdigest()
+    if fingerprint in pager.seen:
+        return None, (f"服务端忽略了 offset：第 {len(pager.pages) + 1} 页与之前某页完全相同，"
+                      f"无法取全（已取 {len(pager.rows())} 行），不交出截断的结果"), False
+    pager.seen.add(fingerprint)
+    pager.pages.append(page)
+    if len(page) < pager.count:
+        return pager.rows(), status, False
+    if len(pager.pages) >= pager.max_pages:
+        return None, (f"资讯翻页到 {pager.max_pages} 页（{len(pager.rows())} 行）仍未取完，"
+                      "判定失败；缩小日期区间或调大 TGW_INFO_MAX_PAGES"), False
+
+    pager.offset += pager.count
+    task.params = [(k, v) for k, v in task.params if k != "offset"] + [("offset", str(pager.offset))]
+    if (err := _encode(task)) is not None:
+        return None, f"翻页请求编码失败：{err}", False
+    with _SESSION._lock:                                   # noqa: SLF001
+        _SESSION._tasks[task.task_id] = task               # noqa: SLF001
+    transport = _SESSION.transport
+    if transport is None:
+        _SESSION.pop_task(task.task_id)
+        return None, f"翻页时 {NO_TRANSPORT}", False
+
+    def _send() -> None:
+        # 回包是在传输层的接收线程上回调的；`send` 会在节流闸门上睡，
+        # 不能在那条线程上发。
+        try:
+            transport.send(task.wire_bytes)
+        except Exception as exc:  # noqa: BLE001 - 发送失败必须变成可见的失败
+            deliver_response(task.task_id, None, f"翻页发送失败: {type(exc).__name__}: {exc}")
+
+    threading.Thread(target=_send, name=f"tgw-page-{task.task_id}", daemon=True).start()
+    return None, None, True
 
 
 def pending_task_ids() -> tuple[int, ...]:
@@ -687,6 +783,19 @@ def SetThirdInfoParam(task_id, key, value):  # noqa: N802
     return ErrorCode.kSuccess
 
 
+def _page_params(params: list[tuple[str, str]]) -> tuple[int, int]:
+    """业务层显式设了 count / offset 就照它的，否则取原生缺省（1000 / 0）。"""
+    from tgwpy.frames.query import DEFAULT_COUNT
+
+    found = dict(params)
+    try:
+        count = int(found.get("count", DEFAULT_COUNT))
+        offset = int(found.get("offset", 0))
+    except ValueError:
+        count, offset = DEFAULT_COUNT, 0
+    return max(count, 1), offset
+
+
 def _encode(task: _Task) -> str | None:
     """把暂存参数编码成待发字节。返回错误消息，None 表示成功。
 
@@ -726,6 +835,7 @@ def QueryThirdInfo(task_id, query_spi=None, return_df_format: bool = True):  # n
     task = _SESSION.task(int(task_id))
     task.return_df_format = return_df_format
     task.transform = lambda records: _to_frame(records, None, return_df_format)
+    task.pager = _Pager(*_page_params(task.params))
 
     # 同步形态：`query_spi` 为空时业务层要**当场拿到结果**。
     # 发完就 `return True, None` 会让调用方拿到 bool，

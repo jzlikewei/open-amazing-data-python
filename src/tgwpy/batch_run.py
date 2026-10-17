@@ -163,6 +163,15 @@ def main(argv: list[str] | None = None) -> int:
     except (OSError, ValueError) as exc:
         print(f"代码表读不出来：{exc}", file=sys.stderr)
         return cli.EXIT_USAGE
+    # 代码校验原先在 `cli.dispatch` 里，登录之后才拦；现在 `cli.run` 解析阶段
+    # 就拦，批处理不走 `cli.run`，在登录前自己拦一次。
+    try:
+        if "codes" in spec.options:
+            cli._check_codes(codes, spec)
+        cli._check_range(opts)
+    except cli.CliError as exc:
+        print(f"参数错误：{exc}", file=sys.stderr)
+        return cli.EXIT_USAGE
 
     out_path = opts.out
     state_path = opts.state

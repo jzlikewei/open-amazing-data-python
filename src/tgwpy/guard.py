@@ -60,6 +60,23 @@ DEFAULT_MAX_FAILURES = 5
 DEFAULT_LOCK_ROOT = "~/.tgwpy"
 
 
+#: 暂时性错误（如 `-89 kHqsError`）的重试次数。调用方自己重试，不进
+#: `RequestGate` 的停手计数——那个计数判断的是「网关整体不可用」（404、断链）。
+DEFAULT_TRANSIENT_RETRIES = 3
+
+
+def transient_retries() -> int:
+    return max(0, int(_env_float("TGW_TRANSIENT_RETRIES", DEFAULT_TRANSIENT_RETRIES)))
+
+
+def transient_delay(attempt: int) -> float:
+    """第 `attempt` 次重试前睡多久：与 `RequestGate` 同一套指数退避和上限，带抖动。"""
+    base = _env_float("TGW_BACKOFF_BASE", DEFAULT_BACKOFF_BASE)
+    cap = _env_float("TGW_BACKOFF_MAX", DEFAULT_BACKOFF_MAX)
+    delay = min(base * (2 ** max(0, attempt - 1)), cap)
+    return delay * (0.8 + 0.4 * random.random()) if delay > 0 else 0.0
+
+
 class SessionBusy(RuntimeError):
     """同账号已经有另一个进程在打网关。
 

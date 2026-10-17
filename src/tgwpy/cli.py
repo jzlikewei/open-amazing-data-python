@@ -182,7 +182,7 @@ CATEGORIES: dict[str, dict[str, MethodSpec]] = {
     "market": {
         "kline": _spec(
             "kline", "MarketData.query_kline", CALL_KLINE,
-            options=(*_CODES_DATES, "period", "adjust"),
+            options=(*_CODES_DATES, "period", "adjust", "allow_partial"),
             required=("codes", "begin", "end"),
             note="无 function_id，走 tgw.QueryKline；--adjust 由本层套复权因子",
         ),
@@ -427,6 +427,12 @@ def _add_option(parser: argparse.ArgumentParser, spec: MethodSpec, name: str) ->
             "--adjust", choices=ADJUST_MODES, default="none", metavar="MODE",
             help="复权方式，默认 none，可选 none/qfq(前复权)/hfq(后复权)",
         )
+    elif name == "allow_partial":
+        parser.add_argument(
+            "--allow-partial", action="store_true",
+            help="复权有缺口时交出能复权的部分（剔除缺因子的行与代码，stderr 汇总）；"
+                 "缺省整次失败",
+        )
     elif name == "type":
         parser.add_argument(
             "--type", choices=SECURITY_TYPES, default=spec.type_default,
@@ -466,6 +472,11 @@ def build_parser() -> argparse.ArgumentParser:
             m_p = sub.add_parser(method, help=desc, description=desc)
             for name in spec.options:
                 _add_option(m_p, spec, name)
+            m_p.add_argument(
+                "--use-cache", action="store_true",
+                help="沿用业务层的本地缓存（厂商语义：有缓存就不发请求）。"
+                     "缺省每次向服务端现取",
+            )
     return parser
 
 
@@ -631,18 +642,24 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _market_data(ad: Any) -> Any:
-    """MarketData 要一份交易日历，来源就是 BaseData.get_calendar。"""
-    calendar = ad.BaseData().get_calendar("str", "SH", today_str())
+def _market_data(ad: Any, end: Any = None) -> Any:
+    """MarketData 要一份交易日历，来源就是 BaseData.get_calendar。
+
+    日历只要到本次查询的 `--end`（不晚于今天）：`MarketData` 只用它挑区间内的
+    交易日。只查历史区间时就不必去核实最新日历，磁盘缓存覆盖得到就零请求（U3）。
+    """
+    today = today_str()
+    until = min(str(end), today) if end else today
+    calendar = ad.BaseData().get_calendar("str", "SH", until)
     return ad.MarketData(calendar)
 
 
-def _resolve(ad: Any, spec: MethodSpec) -> Any:
+def _resolve(ad: Any, spec: MethodSpec, opts: argparse.Namespace | None = None) -> Any:
     """把 "InfoData.get_income" 变成绑好的方法。"""
     cls_name, method = spec.api.split(".")
     owner = ad
     if cls_name == "MarketData":
-        owner = _market_data(ad)
+        owner = _market_data(ad, getattr(opts, "end", None))
     else:
         owner = getattr(ad, cls_name)()
     return getattr(owner, method)
@@ -675,12 +692,30 @@ _TYPE_ARG_METHODS = frozenset({
     "get_code_list", "get_code_info", "get_future_code_list", "get_option_code_list",
 })
 
-#: 合法的带后缀代码，形如 `600519.SH` / `159915.SZ` / `430047.BJ`。
-_SUFFIXED = re.compile(r"^\d{5,6}\.(SH|SZ|BJ|HK|SHF|DCE|CZC|INE|CFFEX)$")
+#: 行情 / 代码表 / ETF 申赎这一路的后缀：业务层 `_codes.split_code` 只认这八个
+#: （厂商 `convert.py::get_tgw_type_code` 同表），别的后缀进去是
+#: `Exception('未知类型--XX')`。`tests/test_cli.py` 盯着它和 SDK 的表一致。
+MARKET_SUFFIXES = frozenset({"SH", "SZ", "BJ", "SHF", "CFE", "DCE", "CZC", "INE"})
+
+#: 资讯类（`QueryThirdInfo`）的代码原样进 `market_code` / `index_code`，不过
+#: `split_code`。多出来的两个：`SI` 是申万行业指数（`801030.SI` 行业成分 706 条，
+#: 2026-10-11 网关调研 R2 探针实测），`HK` 照旧放行。
+INFO_SUFFIXES = MARKET_SUFFIXES | {"HK", "SI"}
+
+#: 代码本体只要求字母数字：期货是 `IF2512.CFE`，期权是 8 位数字，行业指数是
+#: 6 位数字。本体对不对交给服务端（错了回空），入口只拦「没后缀」和「后缀
+#: 不在这一路认的表里」——前者会在几十行外炸，后者会在业务层里炸。
+_SUFFIXED = re.compile(r"^[A-Za-z0-9]+\.([A-Z]+)$")
 
 
-def _check_codes(codes: Sequence[str] | None) -> None:
-    """代码必须带交易所后缀，缺了在入口就说清楚。
+def _code_suffixes(spec: MethodSpec | None) -> frozenset[str]:
+    if spec is not None and spec.call in (CALL_KLINE, CALL_SNAPSHOT, CALL_ETF_INFO):
+        return MARKET_SUFFIXES
+    return INFO_SUFFIXES
+
+
+def _check_codes(codes: Sequence[str] | None, spec: MethodSpec | None = None) -> None:
+    """代码必须带这个方法认得的交易所后缀，缺了在入口就说清楚。
 
     业务层的 `get_tgw_type_code(code)` 直接 `code.split(".")` 拆成
     `(market_type, security_code)`，裸码进去就是
@@ -689,38 +724,118 @@ def _check_codes(codes: Sequence[str] | None) -> None:
 
     **不在这里猜交易所。** 猜错比报错更糟：拿 510050 当 SZ 查，出来的
     是另一只票的数据，而且不报错。宁可让人自己写对后缀。
+
+    后缀表按方法的代码域分（`_code_suffixes`）：行情一路不认 `.SI`，资讯一路认。
+    曾经全部方法共用一张「5–6 位数字 + SH…CFFEX」的表，误拒了 `801120.SI`
+    和 `IF2512.CFE`，却放行了业务层并不认的 `CFFEX`。
     """
     if not codes:
         return
-    bare = [c for c in codes if not _SUFFIXED.match(str(c).strip())]
-    if bare:
-        sample = ", ".join(bare[:5]) + (" …" if len(bare) > 5 else "")
+    allowed = _code_suffixes(spec)
+    bad = []
+    for c in codes:
+        m = _SUFFIXED.match(str(c).strip())
+        if not m or m.group(1) not in allowed:
+            bad.append(str(c))
+    if bad:
+        sample = ", ".join(bad[:5]) + (" …" if len(bad) > 5 else "")
         raise CliError(
-            f"这些代码没带交易所后缀：{sample}\n"
-            f"  形如 600519.SH / 159915.SZ / 430047.BJ。\n"
+            f"这些代码没带交易所后缀，或后缀不在本方法认的范围里：{sample}\n"
+            f"  形如 600519.SH / 159915.SZ / 430047.BJ；本方法认 "
+            f"{'/'.join(sorted(allowed))}。\n"
             f"  这里不替你猜——猜错会查到另一只票，而且不报错。"
         )
 
 
-def dispatch(ad: Any, spec: MethodSpec, opts: argparse.Namespace) -> Any:
-    fn = _resolve(ad, spec)
-    method = spec.api.split(".")[1]
+def _check_range(opts: argparse.Namespace) -> None:
+    """`--begin` 晚于 `--end` 在入口拒绝。
 
-    if "codes" in spec.options:
-        _check_codes(getattr(opts, "codes", None))
+    放进业务层的后果不一：权重表曾经永久挂住（V11），别的方法回空、exit 0。
+    """
+    begin, end = getattr(opts, "begin", None), getattr(opts, "end", None)
+    if begin is not None and end is not None and int(begin) > int(end):
+        raise CliError(f"--begin {begin} 晚于 --end {end}")
+
+
+#: 成分类方法走 `Members` 引擎：`is_local=True` 只读本地，缺的代码直接跳过、
+#: **不回落到下载**（厂商行为，`info.py` `Members.query`）。
+_MEMBERS_METHODS = frozenset({"get_index_constituent", "get_industry_constituent"})
+
+
+@contextlib.contextmanager
+def _call_root(use_cache: bool):
+    """这一次调用的数据根。
+
+    **缺省给一个空的临时目录，用完即删**（U1）。业务层是厂商语义：
+    `is_local=True` 时有缓存就直接返回、一个请求都不发，成分类没缓存就返回空。
+    CLI 交给下游的必须是服务端当前的数据，所以每次调用都从空目录起步、
+    `is_local=False`，业务层只能现取。目录按**调用**给而不是按进程给：批处理
+    一个进程跑几十批，共用一个目录的话复权因子整表会越攒越大
+    （`download_backward_factor` 无条件把本地已有的代码并进请求）。
+
+    `--use-cache` 时返回 None：沿用业务层自己的数据根和缓存语义。
+
+    交易日历的磁盘缓存不在这里：它是本仓自己加的，跟着 `TGW_LOCAL_DATA_ROOT`
+    走（`OpenAmazingData.base._calendar_path`），按需增量刷新，不受影响。
+    """
+    if use_cache:
+        yield None
+        return
+    import shutil
+    import tempfile
+
+    root = tempfile.mkdtemp(prefix="tgwpy-fresh-")
+    try:
+        yield root + os.sep
+    finally:
+        shutil.rmtree(root, ignore_errors=True)
+
+
+def _cache_kwargs(fn: Any, root: str | None) -> dict[str, Any]:
+    """`root` 不为 None 时，给接受这两个参数的方法补上 `local_path` 与 `is_local=False`。
+
+    按签名判断而不是按方法名列清单：67 个查询方法里有的没有 `is_local`
+    （公告、K 线），列清单迟早漂。
+    """
+    if root is None:
+        return {}
+    import inspect
+
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return {}
+    kwargs: dict[str, Any] = {}
+    if "local_path" in params:
+        kwargs["local_path"] = root
+    if "is_local" in params:
+        kwargs["is_local"] = False
+    return kwargs
+
+
+def dispatch(ad: Any, spec: MethodSpec, opts: argparse.Namespace) -> Any:
+    with _call_root(bool(getattr(opts, "use_cache", False))) as root:
+        return _dispatch(ad, spec, opts, root)
+
+
+def _dispatch(ad: Any, spec: MethodSpec, opts: argparse.Namespace,
+              root: str | None) -> Any:
+    fn = _resolve(ad, spec, opts)
+    method = spec.api.split(".")[1]
+    extra = _cache_kwargs(fn, root)
 
     if spec.codes_are_terms:
         # 国债收益率：--terms 进 code_list 位，对应契约里的 indi_type
-        return fn(opts.terms)
+        return fn(opts.terms, **extra)
 
     if method in _TYPE_ARG_METHODS:
-        return fn(opts.type)
+        return fn(opts.type, **extra)
 
     if method == "get_calendar":
         return fn("str", opts.market, today_str())
 
     if "codes" not in spec.options:
-        return fn(**_date_kwargs(spec, opts))
+        return fn(**_date_kwargs(spec, opts), **extra)
 
     if method == "query_kline":
         # 业务层比较的是 `period == Period.<x>.value`。`Period` 是普通 Enum，
@@ -731,12 +846,21 @@ def dispatch(ad: Any, spec: MethodSpec, opts: argparse.Namespace) -> Any:
         result = fn(opts.codes, opts.begin, opts.end, period)
         if opts.adjust == "none":
             return result
-        return apply_adjust(ad, result, opts.adjust)
+        return apply_adjust(ad, result, opts.adjust,
+                            allow_partial=bool(getattr(opts, "allow_partial", False)),
+                            root=root)
 
     if method == "query_snapshot":
         return fn(opts.codes, opts.begin, opts.end)
 
-    return fn(opts.codes, **_date_kwargs(spec, opts))
+    result = fn(opts.codes, **_date_kwargs(spec, opts), **extra)
+    if root is None and method in _MEMBERS_METHODS and isinstance(result, dict):
+        # `--use-cache` 下成分类没缓存的代码被厂商语义跳过；缺的那几只现取，
+        # 不让「新环境」看起来像「没有成分股」。
+        missing = [c for c in opts.codes if c not in result]
+        if missing:
+            result = {**result, **fn(missing, is_local=False)}
+    return result
 
 
 #: 复权因子只走 backward_factor 这一张表。ReqGetExFactor 回的是 5 列 CSV，
@@ -771,7 +895,12 @@ def _factor_columns_of(table: Any) -> dict[str, Any] | None:
     return None
 
 
-def _fetch_missing_factors(base: Any, codes: Sequence[str]) -> Any:
+def _root_kwargs(root: str | None) -> dict[str, Any]:
+    """`_call_root` 给的临时数据根；`--use-cache` 时为空，用业务层自己的缺省。"""
+    return {"local_path": root} if root is not None else {}
+
+
+def _fetch_missing_factors(base: Any, codes: Sequence[str], root: str | None = None) -> Any:
     """补下载复权因子，返回下载后的整表；补不回来返回 None。
 
     **为什么必须补。** `get_backward_factor` 是**整表快照**语义：文件不存在
@@ -783,12 +912,13 @@ def _fetch_missing_factors(base: Any, codes: Sequence[str]) -> Any:
 
     `is_local=False` 就是补下载那一路：按 `code_list` 重下一轮，本地已有的代码
     一并带上（厂商 `download_backward_factor` 无条件读本地），整表写回
-    `basedata/backward_factor/`。**`local_path` 不给**：数据根是业务层自己的
-    缺省（`TGW_LOCAL_DATA_ROOT`，没设 `~/.amazingdata_local/`），本层不替它
-    猜路径——猜出来的路径会让补下载写到另一个数据根去。
+    `basedata/backward_factor/`。数据根只有两种来源：`_call_root` 给的本次调用
+    的空目录，或者（`--use-cache`）业务层自己的缺省——本层不另猜路径，猜出来的
+    路径会让补下载写到另一个数据根去。
     """
     try:
-        return getattr(base, _FACTOR_GETTER)(list(codes), is_local=False)
+        return getattr(base, _FACTOR_GETTER)(list(codes), is_local=False,
+                                             **_root_kwargs(root))
     except Exception as exc:  # noqa: BLE001
         print(
             f"警告：补下载复权因子失败（{type(exc).__name__}: {exc}）",
@@ -797,19 +927,44 @@ def _fetch_missing_factors(base: Any, codes: Sequence[str]) -> Any:
         return None
 
 
-def _factors_for(base: Any, codes: Sequence[str], adjust: str) -> dict[str, Any]:
+class AdjustIncomplete(RuntimeFailure):
+    """要求的复权有一行做不出来。退出码 3，stdout 不出任何东西。
+
+    U2（下游集成方反馈）：缺因子的行曾原样保留未复权价、整只缺的静默剔除，
+    退出码都是 0。调用方要么拿到完整的复权结果，要么明确失败；要部分结果得
+    显式 `--allow-partial`。
+    """
+
+
+def _last_day(series: Any) -> Any:
+    import pandas as pd
+
+    valid = series.dropna()
+    return pd.to_datetime(valid.index).normalize().max() if not valid.empty else None
+
+
+def _factors_for(base: Any, codes: Sequence[str], adjust: str,
+                 until: dict[str, Any] | None = None,
+                 root: str | None = None) -> dict[str, Any]:
     """要复权的这几只，各自的因子列 `{代码: Series}`。
 
-    本地整表缺代码时，末尾那次 `factor[code_list]` 抛 `KeyError`（厂商语义：
-    只打印一句 `not in local backward_factor`）。接住它就补下载一次；补下来
-    仍缺的写进 stderr 的可数汇总，`apply_adjust` 按「整只跳过」处理。
+    两种情况会用 `is_local=False` 现取一次（`_fetch_missing_factors`）：
+
+    1. 本地整表缺代码：末尾那次 `factor[code_list]` 抛 `KeyError`（厂商语义：
+       只打印一句 `not in local backward_factor`）；
+    2. 因子表的最后一天早于这只代码 K 线的最后一天（`until`）：
+       `backward_factor.h5` 一旦存在就只读不刷新，缓存建好之后的新交易日
+       匹配不到因子（U1）。CLI 默认用隔离的空数据根，这条只在 `--use-cache`
+       时才会触发。
+
+    现取之后仍缺的，交给 `apply_adjust` 按 U2 的规则处理。
     """
     downloaded = False
     try:
-        table = getattr(base, _FACTOR_GETTER)(list(codes))
+        table = getattr(base, _FACTOR_GETTER)(list(codes), **_root_kwargs(root))
     except KeyError:
         downloaded = True
-        table = _fetch_missing_factors(base, codes)
+        table = _fetch_missing_factors(base, codes, root)
     except Exception as exc:
         if _is_incomplete_calendar(exc):
             raise         # 日历取不全有自己的说法，交给 main 归类
@@ -820,23 +975,48 @@ def _factors_for(base: Any, codes: Sequence[str], adjust: str) -> dict[str, Any]
 
     factors = _factor_columns_of(table)
     if factors is None:
-        print(
-            f"警告：复权因子形状不认识（{type(table).__name__}），跳过复权",
-            file=sys.stderr,
-        )
+        print(f"警告：复权因子形状不认识（{type(table).__name__}）", file=sys.stderr)
         return {}
+
+    if not downloaded and until:
+        import pandas as pd
+
+        def _behind(code: str) -> bool:
+            series, need = factors.get(code), until.get(code)
+            if not isinstance(series, pd.Series) or need is None:
+                return False
+            last = _last_day(series)
+            return last is None or last < need
+
+        stale = [c for c in codes if _behind(c)]
+        if stale:
+            print(
+                f"复权因子表的末日早于 K 线末日（{len(stale)} 只，如 {stale[0]}），"
+                "现取一次",
+                file=sys.stderr,
+            )
+            fresh = _factor_columns_of(_fetch_missing_factors(base, codes, root))
+            if fresh is not None:
+                factors = fresh
+            downloaded = True
+
     missing = [c for c in codes if c not in factors]
     if missing:
         print(
             f"复权因子表缺 {len(missing)} 只（{', '.join(missing[:5])}"
             f"{' …' if len(missing) > 5 else ''}）"
-            + ("，已按需补下载" if downloaded else ""),
+            + ("，已现取" if downloaded else ""),
             file=sys.stderr,
         )
     return factors
 
 
-def apply_adjust(ad: Any, kline_map: Any, adjust: str) -> Any:
+def _sample(items: Sequence[str], n: int = 10) -> str:
+    return ", ".join(items[:n]) + (" …" if len(items) > n else "")
+
+
+def apply_adjust(ad: Any, kline_map: Any, adjust: str, allow_partial: bool = False,
+                 root: str | None = None) -> Any:
     """按复权因子缩放 K 线的四个价格列。
 
     公式照参照实现：
@@ -845,101 +1025,117 @@ def apply_adjust(ad: Any, kline_map: Any, adjust: str) -> Any:
         qfq     matched / factor.iloc[-1]         # 前复权除末值归一
         hfq     matched                           # 后复权直接用
 
-    因子只向**真有 K 线的那几只**要（`_factors_for` 内部按需补下载）；
-    补下来还是没有的，整只跳过并在 stderr 打一条**可数的汇总**——不把没复权的
-    价混进复权结果，也不让「少给了几只」只藏在零散警告里。
+    **复权价和未复权价绝不混在一张表里**（U2）。有任何一行做不出来：
 
-    `kline_map` 就是全部输入：没有 K 线的代码不占因子请求。
+    * 缺省：抛 `AdjustIncomplete`（退出码 3），stderr 列出代码与缺因子的日期；
+    * `allow_partial=True`：缺因子的行剔除，整只做不出来的代码剔除，
+      stderr 给一条可数汇总，退出码 0。
+
+    因子只向**真有 K 线的那几只**要；`kline_map` 里不是 DataFrame 的值
+    （业务层的「没数据」是 None）原样放行，那不是复权失败。
     """
     import pandas as pd
 
     base = ad.BaseData()
     frames = {c: f for c, f in (kline_map or {}).items()
               if isinstance(f, pd.DataFrame)}
-    factors = _factors_for(base, list(frames), adjust) if frames else {}
+    until = {}
+    for code, frame in frames.items():
+        if _KLINE_TIME in frame.columns and not frame.empty:
+            until[code] = pd.to_datetime(frame[_KLINE_TIME]).dt.normalize().max()
+    factors = _factors_for(base, list(frames), adjust, until, root) if frames else {}
 
     out: dict[str, Any] = {}
+    problems: list[str] = []
     dropped: list[str] = []
+    trimmed = 0
     for code, frame in (kline_map or {}).items():
         if not isinstance(frame, pd.DataFrame):
             out[code] = frame
             continue
-        adjusted = _adjust_frame(code, frame, factors, adjust)
-        if adjusted is not None:
-            out[code] = adjusted
-        else:
+        adjusted, problem, missing_days = _adjust_frame(code, frame, factors, adjust)
+        if problem:
+            problems.append(f"{code}：{problem}")
+        if adjusted is None:
             dropped.append(code)
-    if dropped:
-        # 一条汇总，而不是散在各只下面的单行警告。调用方一眼能看出
-        # 「要了 50 只，交了 48 只」——这在分批同步里是会决定要不要重跑的。
+            continue
+        if missing_days:
+            trimmed += len(missing_days)
+        out[code] = adjusted
+
+    if problems and not allow_partial:
+        raise AdjustIncomplete(
+            f"复权未完成（adjust={adjust}），{len(problems)}/{len(frames)} 只有问题，"
+            "整次不交结果；要部分结果加 --allow-partial：\n  "
+            + "\n  ".join(problems[:20])
+            + (f"\n  … 另 {len(problems) - 20} 只" if len(problems) > 20 else "")
+        )
+    if problems:
         print(
-            f"复权未完成：{len(dropped)}/{len(frames)} 只拿不到因子，"
-            f"已从结果中剔除（不会混进未复权的价）：{', '.join(dropped[:10])}"
-            f"{' …' if len(dropped) > 10 else ''}",
+            f"复权未完成（--allow-partial）：剔除 {len(dropped)}/{len(frames)} 只"
+            f"{'（' + _sample(dropped) + '）' if dropped else ''}，"
+            f"另剔除 {trimmed} 根缺因子的 K 线；不含未复权价",
             file=sys.stderr,
         )
+        for line in problems[:20]:
+            print("  " + line, file=sys.stderr)
     return out
 
 
 def _adjust_frame(
     code: str, frame: Any, factors: Any, adjust: str
-) -> Any | None:
-    """复权单只股票的 K 线。返回 None 表示整只跳过（已告警）。
+) -> tuple[Any | None, str, list[str]]:
+    """复权单只股票的 K 线。
+
+    返回 `(结果, 问题, 缺因子的日期)`：
+    * 全部做出来：`(frame, "", [])`；
+    * 部分行缺因子：`(只含做出来那些行的 frame, 问题, 日期)`——要不要接受由
+      `apply_adjust` 按 `allow_partial` 决定；
+    * 整只做不出来：`(None, 问题, [])`。
 
     因子表是宽表 `{code: Series}`（索引 = 交易日，列名 = 带后缀的代码），
     实测 HDF5 里就是单列的阶梯函数，见 reference-output-shapes.md 1.4。
     """
     import pandas as pd
 
+    if frame.empty:
+        return frame, "", []
     factor = factors.get(code) if isinstance(factors, dict) else None
-    if not isinstance(factor, pd.Series) or factor.empty:
-        print(f"警告：{code} 没有复权因子，跳过该代码", file=sys.stderr)
-        return None
+    if not isinstance(factor, pd.Series) or factor.dropna().empty:
+        return None, "没有复权因子", []
     if factor.index.has_duplicates:
-        print(
-            f"警告：{code} 的复权因子表有重复交易日，reindex 会炸，跳过该代码",
-            file=sys.stderr,
-        )
-        return None
+        return None, "复权因子表有重复交易日", []
     if _KLINE_TIME not in frame.columns:
-        print(
-            f"警告：{code} 缺 {_KLINE_TIME} 列（实际 {list(frame.columns)}），跳过复权",
-            file=sys.stderr,
-        )
-        return None
+        return None, f"缺 {_KLINE_TIME} 列（实际 {list(frame.columns)}）", []
     prices = [c for c in _PRICE_COLUMNS if c in frame.columns]
     if not prices:
-        print(f"警告：{code} 缺全部价格列 {list(_PRICE_COLUMNS)}，跳过复权", file=sys.stderr)
-        return None
+        return None, f"缺全部价格列 {list(_PRICE_COLUMNS)}", []
 
     # 两边都归到零点再对齐：K 线的时间列可能是 datetime、date 或字符串，
     # 因子表索引恒为 datetime64[ns]。按值对齐，不碰 frame 自己的索引形态。
     factor = factor.copy()
     factor.index = pd.to_datetime(factor.index).normalize()
-    matched = factor.reindex(pd.to_datetime(frame[_KLINE_TIME]).dt.normalize())
+    days = pd.to_datetime(frame[_KLINE_TIME]).dt.normalize()
+    matched = factor.reindex(days)
 
     hit = matched.notna().to_numpy()
+    missing_days = sorted({d.strftime("%Y%m%d") for d in days[~hit]})
     if not hit.any():
-        print(
-            f"警告：{code} 的 {len(frame)} 根 K 线都匹配不上复权因子，跳过该代码",
-            file=sys.stderr,
-        )
-        return None
-    if not hit.all():
-        print(
-            f"警告：{code} 有 {int((~hit).sum())}/{len(hit)} 根 K 线缺复权因子，"
-            "这些行原样保留未复权价",
-            file=sys.stderr,
-        )
+        return None, f"{len(frame)} 根 K 线都匹配不上复权因子（{_sample(missing_days, 5)}）", []
 
-    multiplier = matched if adjust == "hfq" else matched / factor.iloc[-1]
+    anchor = factor.dropna().iloc[-1]
+    multiplier = matched if adjust == "hfq" else matched / anchor
     out = frame.copy()
     # multiplier 的索引是 K 线时间，frame 的是行号，两者对不上。借 to_numpy
     # 换成按行对齐，免得 pandas 按索引对齐出一个全 NaN 的「复权价」。
     scale = pd.Series(multiplier.to_numpy(), index=out.index)
     for col in prices:
-        out[col] = out[col].where(~hit, (out[col] * scale).round(6))
-    return out
+        out[col] = (out[col] * scale).round(6)
+    if hit.all():
+        return out, "", []
+    problem = (f"{int((~hit).sum())}/{len(hit)} 根 K 线缺复权因子"
+               f"（{_sample(missing_days, 5)}）")
+    return out[hit], problem, missing_days
 
 
 # --------------------------------------------------------------------------
@@ -1062,6 +1258,11 @@ def run(argv: Sequence[str]) -> tuple[MethodSpec, argparse.Namespace]:
             + "/".join(CATEGORIES[args.category])
         )
     spec = CATEGORIES[args.category][args.method]
+    # 能在本地判定的错误都在这里拦：登录要占单会话锁、消耗一次会话，
+    # 参数错不该付这个代价。
+    if "codes" in spec.options:
+        _check_codes(getattr(args, "codes", None), spec)
+    _check_range(args)
     return spec, args
 
 

@@ -25,6 +25,7 @@ import json
 import os
 import pickle
 import threading
+import time
 from collections.abc import Callable
 from typing import Any
 
@@ -48,8 +49,11 @@ from .security_type import is_security_type
 
 CALENDAR_FUNCTION_ID = "A010061003"
 
-#: 服务端单次响应的行数上限。实测取满 1000 就停，且 `offset` 无效
-#: （`tgwpy.patches` 模块头，探针实发 66 号包）。
+#: 服务端单次响应的行数上限：请求的 `count`，原生缺省 1000。早先探针（`tgwpy.patches`
+#: 模块头，66 号包）判「`offset` 无效」；2026-10-11 复测 offset 0/1000/2000 三页
+#: 8738 行无缺口无重复（2026-10-11 网关调研 R1，探针实测），替身层现在
+#: 按 offset 翻页（`tgwpy.compat.tgw_module._Pager`）。分段拼接照旧保留：每段远
+#: 小于一页，请求小、失败面也小。
 SERVER_ROW_LIMIT = 1000
 
 #: 一个窗口几年。A 股一年约 242 个交易日，3 年约 726 行，留足余量。
@@ -92,14 +96,33 @@ def _first_day() -> str:
     return os.environ.get(FIRST_DAY_ENV) or CALENDAR_FIRST_DAY
 
 
+#: 网关的暂时性错误：`kHqsError`（-89）。2026-10-17（周六）实测 7 次日历拼接里
+#: 4 次被回 -89，其中一次只查 `20260101~20261017` 一段也失败，过一会儿再查就好。
+#: 按 `tgwpy.guard.transient_delay` 退避重试，次数由 `TGW_TRANSIENT_RETRIES` 定。
+TRANSIENT_MARKERS = ("status=-89",)
+
+
+def _is_transient(error: Any) -> bool:
+    text = str(error)
+    return any(marker in text for marker in TRANSIENT_MARKERS)
+
+
 def _fetch_window(market_wire: str, start: str, end: str) -> list[int]:
     """一个日期窗口的交易日。空列表表示该窗口无数据。"""
-    task_id = tgw.GetTaskID()
-    for key, value in (("function_id", CALENDAR_FUNCTION_ID),
-                       ("start_date", start), ("end_date", end),
-                       ("market", market_wire)):
-        tgw.SetThirdInfoParam(task_id, key, value)
-    frame, error = tgw.QueryThirdInfo(task_id)
+    from tgwpy import guard
+
+    retries = guard.transient_retries()
+    for attempt in range(retries + 1):
+        task_id = tgw.GetTaskID()
+        for key, value in (("function_id", CALENDAR_FUNCTION_ID),
+                           ("start_date", start), ("end_date", end),
+                           ("market", market_wire)):
+            tgw.SetThirdInfoParam(task_id, key, value)
+        frame, error = tgw.QueryThirdInfo(task_id)
+        if error and _is_transient(error) and attempt < retries:
+            time.sleep(guard.transient_delay(attempt + 1))
+            continue
+        break
     if error:
         # `status=-100` 是「这段区间没数据」，不是错误：1990 年 1 月上交所
         # 还没开市，头几个窗口空是正常的。参数非法走 301010 且必带中文 msg
@@ -117,36 +140,67 @@ def _calendar_path(market: str, first_day: str) -> str:
     return os.path.join(local_root(), "calendar", f"{market}-{first_day}.json")
 
 
-def _read_calendar_disk(market: str, first_day: str, end: int) -> list[int] | None:
-    """读磁盘缓存，够不到 `end` 就返回 None。
+def _read_calendar_disk(market: str, first_day: str) -> tuple[list[int], int] | None:
+    """读磁盘缓存，返回 `(交易日, 已核实到哪天)`；没有或坏了返回 None。
 
-    缓存键**不含 end**：日历只往历史里长，写进去的只会比要的新鲜。键里带上
-    end 的话每天换一次文件名，缓存等于没有。
+    缓存键**不含 end**：日历只往历史里长，键里带上 end 的话每天换一次文件名，
+    缓存等于没有。
+
+    「已核实到哪天」（`through`）和「最后一个交易日」不是一回事：周五收盘后
+    缓存的末日是周五，周六、周日再查，区间 `[周六, 周日]` 本来就没有交易日。
+    只看末日的话每个周末、节假日、每天第一次都会判「不新鲜」并整份重拼
+    （U3）。老格式是一个裸列表，`through` 取它的末日。
     """
     path = _calendar_path(market, first_day)
     if not os.path.exists(path):
         return None
     try:
         with open(path, "r", encoding="utf-8") as handle:
-            days = [int(day) for day in json.load(handle)]
-    except (OSError, ValueError, TypeError):
+            raw = json.load(handle)
+        if isinstance(raw, dict):
+            days = [int(day) for day in raw["days"]]
+            through = int(raw["through"])
+        else:
+            days = [int(day) for day in raw]
+            through = days[-1] if days else 0
+    except (OSError, ValueError, TypeError, KeyError, IndexError):
         return None      # 缓存坏了就当没有，重拼一遍而已
-    if not days or days[-1] < end:
-        return None      # 跨天了，缓存不够新鲜，重拼
-    return days
+    if not days:
+        return None
+    return days, through
 
 
-def _write_calendar_disk(market: str, first_day: str, days: list[int]) -> None:
-    """落盘。写失败不影响主流程——缓存是加速器，不是必需品。"""
+def _write_calendar_disk(market: str, first_day: str, days: list[int], through: int) -> None:
+    """落盘。写失败不影响主流程——缓存是加速器，不是必需品。
+
+    只落 `through` 及以前的交易日：之后的日子（服务端可能给出已排定的未来交易日）
+    还会因为临时休市而变，下次按增量重新核实。
+    """
     path = _calendar_path(market, first_day)
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         tmp = path + ".tmp"
         with open(tmp, "w", encoding="utf-8") as handle:
-            json.dump(days, handle)
+            json.dump({"days": [d for d in days if d <= through], "through": through}, handle)
         os.replace(tmp, path)
     except OSError as exc:
         print(f"警告：交易日历缓存写不进去（{exc}），下个进程要重拼")
+
+
+def _fetch_forward(market_wire: str, start_day: dt.date, end_day: dt.date) -> list[int]:
+    """`[start_day, end_day]` 往后分段取。增量补查用，通常只有一段。"""
+    days: list[int] = []
+    cursor = start_day
+    while cursor <= end_day:
+        stop = min(end_day, cursor + dt.timedelta(days=365 * SEGMENT_YEARS))
+        window = _fetch_window(market_wire, cursor.strftime("%Y%m%d"), stop.strftime("%Y%m%d"))
+        if len(window) >= SERVER_ROW_LIMIT:
+            raise IncompleteCalendar(
+                f"交易日历 {cursor:%Y%m%d}~{stop:%Y%m%d} 取满 {SERVER_ROW_LIMIT} 行，疑似截断"
+            )
+        days.extend(window)
+        cursor = stop + dt.timedelta(days=1)
+    return days
 
 
 def full_calendar(market: str, end: str, first_day: str) -> list[int]:
@@ -159,7 +213,11 @@ def full_calendar(market: str, end: str, first_day: str) -> list[int]:
 
     两级缓存：进程内按 `(market, end, first_day)` 记（日历在一次进程里会被
     `MarketData` 构造和因子 reindex 反复要），磁盘按 `(market, first_day)` 记
-    （分批任务跨进程复用）。
+    （分批任务跨进程复用）。磁盘缓存**按需、增量**刷新（U3）：
+
+    * 缓存已核实到 `end`（只查历史区间，或今天已经查过）：0 次请求；
+    * 否则只补查 `(已核实那天, end]` 这一段，合并后写回，不整份重拼；
+    * 没有缓存才整份往回拼。
     """
     key = (market, str(end)[:8], first_day)
     cached = _calendar_cache.get(key)
@@ -173,13 +231,26 @@ def full_calendar(market: str, end: str, first_day: str) -> list[int]:
     start_day = dt.datetime.strptime(first_day, "%Y%m%d").date()
     if start_day > end_day:
         return []
+    end_int = int(end_day.strftime("%Y%m%d"))
+    # 「核实到哪天」不越过今天：未来的交易日还会因临时休市而变。
+    through = min(end_int, int(_clock.today()))
 
-    on_disk = _read_calendar_disk(market, first_day, int(end_day.strftime("%Y%m%d")))
+    on_disk = _read_calendar_disk(market, first_day)
     if on_disk is not None:
-        _calendar_cache[key] = on_disk
-        return on_disk
+        days, checked = on_disk
+        if checked >= end_int:
+            result = [d for d in days if d <= end_int]
+            _calendar_cache[key] = result
+            return result
+        resume = dt.datetime.strptime(str(checked), "%Y%m%d").date() + dt.timedelta(days=1)
+        fresh = _fetch_forward(market_wire, resume, end_day)
+        result = sorted(set(days) | set(fresh))
+        result = [d for d in result if d <= end_int]
+        _calendar_cache[key] = result
+        _write_calendar_disk(market, first_day, result, max(through, checked))
+        return result
 
-    days: list[int] = []
+    days = []
     cursor_end = end_day
     for _ in range(MAX_SEGMENTS):
         cursor_start = max(start_day, cursor_end - dt.timedelta(days=365 * SEGMENT_YEARS))
@@ -211,7 +282,7 @@ def full_calendar(market: str, end: str, first_day: str) -> list[int]:
             f"{(earliest - start_day).days} 天，中间疑似整段没取到"
         )
     _calendar_cache[key] = uniq
-    _write_calendar_disk(market, first_day, uniq)
+    _write_calendar_disk(market, first_day, uniq, through)
     return uniq
 
 

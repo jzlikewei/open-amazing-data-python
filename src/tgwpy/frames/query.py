@@ -136,7 +136,9 @@ def build_third_info_request(
     rest: list[tuple[str, str]] = []
     for k, v in items:
         if k in top:
-            top[k] = v
+            # offset / count 是数字节点（原生侧 `sub_7fe890(..., "count", 5, 1000)`
+            # 写的是整数）；SetThirdInfoParam 一律存成字符串，这里转回来。
+            top[k] = int(v) if k in (KEY_OFFSET, KEY_COUNT) else v
         else:
             rest.append((k, v))
 

@@ -61,6 +61,16 @@ def _hooks() -> tuple[Callable | None, Callable | None]:
     return _deliver_logon, _deliver_response
 
 
+
+#: 网关 JSON 信封里的「这组参数查不到数据」（`tag='DataEmpty'`），
+#: 2026-10-11 网关调研探针实测。不是失败。
+_EMPTY_STATUS = -100
+
+#: 暂时性错误：由调用方按 `guard.transient_delay` 重试（交易日历是
+#: `OpenAmazingData.base._fetch_window`），不进 `RequestGate` 的停手计数——
+#: 两套计数混在一起，重试几次就会把整轮判成「网关停手」（退出码 5）。
+_TRANSIENT_STATUSES = frozenset({-89})
+
 class WssTransport:
     """把 compat 的 ``send(bytes)`` 落到真实网关。
 
@@ -267,8 +277,16 @@ class WssTransport:
                 # 业务错误：回传 msg 字符串，让业务层记进 error_list
                 if task_id is not None:
                     self.pending.pop(int(task_id), None)
-                    msg = str(env.get("msg") or f"status={status}")
-                    self.gate.record_failure(msg)
+                    # 带上 status：业务层拿到的只有这串字，有 msg 时原先就丢了码，
+                    # 上层没法区分「暂时性错误」和「参数错」。
+                    raw_msg = env.get("msg")
+                    msg = f"{raw_msg}（status={status}）" if raw_msg else f"status={status}"
+                    if status == _EMPTY_STATUS:
+                        # 空结果说明后端活着，不是失败；记成失败的话连续 5 只
+                        # 没数据的代码就会被判「网关不可用」退出码 5。
+                        self.gate.record_success()
+                    elif status not in _TRANSIENT_STATUSES:
+                        self.gate.record_failure(msg)
                     if rsp_cb:
                         rsp_cb(int(task_id), None, msg)
                 continue
