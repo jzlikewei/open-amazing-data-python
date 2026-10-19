@@ -32,6 +32,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ._diagnostics import emit_failure
+
 from tgwpy.compat import structs
 from tgwpy.compat import tgw_module as tgw
 
@@ -464,7 +466,7 @@ def _download_hist_code_list(path: str, days: list[int]) -> None:
 FACTOR_BATCH = 300
 
 
-def _ex_factor_round(codes: list[str], frames: dict[str, Any]) -> list[str]:
+def _ex_factor_round(codes: list[str], frames: dict[str, Any], *, attempt: int = 1) -> list[str]:
     """一轮 `QueryExFactorTable`：等齐回包写进 `frames`，返回失败的代码。
 
     判失败的规则与资讯族同源（`_gateway.is_failed`）。**用异步形态而不是同步**：
@@ -483,6 +485,8 @@ def _ex_factor_round(codes: list[str], frames: dict[str, Any]) -> list[str]:
                     frames[code] = data
                 if is_failed(status):
                     failed.append(code)
+                    emit_failure("query_failed", method="QueryExFactorTable", code=code,
+                                 attempt=attempt, max_attempts=RETRY_TIMES + 1, status=status)
                 left[0] -= 1
                 if left[0] == 0:
                     done.set()
@@ -508,7 +512,7 @@ def _ex_factors(codes: list[str]) -> dict[str, Any]:
             if not failed:
                 break
             print("retry ", str(i))
-            failed = _ex_factor_round(failed, frames)
+            failed = _ex_factor_round(failed, frames, attempt=i + 2)
         if failed:
             raise Exception("查询失败")
     return frames

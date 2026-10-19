@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import time
+from ._diagnostics import emit_failure, remember_credentials
 
 from tgwpy.compat import structs
 from tgwpy.compat import tgw_module as tgw
@@ -28,7 +29,7 @@ _COLOCATION_DEFAULT = {"qtcp_channel_thread": 8, "qtcp_max_req_cnt": 3000,
 
 
 class _LogWatcher(structs.ILogSpi):
-    """只盯一件事：服务端有没有说连接数超限。"""
+    """保留脱敏错误日志，并识别服务端连接数超限。"""
 
     def __init__(self, log_level: int = 4) -> None:
         super().__init__()
@@ -38,6 +39,9 @@ class _LogWatcher(structs.ILogSpi):
     def OnLog(self, level, log, len):  # noqa: A002, N802 - 与厂商回调同名同参
         if level >= self.log_level and _MAX_LIMITATION in log:
             self.max_limitation = True
+
+        if level >= self.log_level:
+            emit_failure("sdk_error", level=level, message=log)
 
     def OnLogon(self, data):  # noqa: N802
         pass
@@ -52,6 +56,7 @@ def _ensure_transport(username: str, password: str, host: str, port) -> None:
 
 
 def _config(username, password, host, port, api_mode, colocation, force_logout):
+    remember_credentials(username, password)
     tgw.Close()
     watcher = _LogWatcher()
     tgw.SetLogSpi(watcher)

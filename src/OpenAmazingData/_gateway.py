@@ -24,6 +24,7 @@ from typing import Any
 import pandas as pd
 
 from tgwpy.compat import tgw_module as tgw
+from ._diagnostics import emit_failure
 
 #: 厂商 `QueryPara.retry_times`。
 RETRY_TIMES = 3
@@ -46,7 +47,8 @@ def is_failed(status: Any) -> bool:
 
 
 def _send_round(keys: Sequence[Hashable], params_of: Callable[[Hashable], Params],
-                frames: dict[Hashable, pd.DataFrame]) -> list[Hashable]:
+                frames: dict[Hashable, pd.DataFrame], *, attempt: int = 1,
+                max_attempts: int = RETRY_TIMES + 1) -> list[Hashable]:
     """发一轮，等齐回包。回包写进 `frames`，返回失败的键（按回包到达顺序）。"""
     if not keys:
         return []
@@ -55,13 +57,16 @@ def _send_round(keys: Sequence[Hashable], params_of: Callable[[Hashable], Params
     pending = [len(keys)]
     failed: list[Hashable] = []
 
-    def on_response(key: Hashable) -> Callable[[Any, Any], None]:
+    def on_response(key: Hashable, task_id: int, function_id) -> Callable[[Any, Any], None]:
         def callback(data: Any, status: Any) -> None:
             with lock:
                 if data is not None:
                     frames[key] = data
                 if is_failed(status):
                     failed.append(key)
+                    emit_failure("query_failed", method="QueryThirdInfo", function_id=function_id,
+                                 code=key, task_id=task_id, attempt=attempt, max_attempts=max_attempts,
+                                 status=status)
                 pending[0] -= 1
                 if pending[0] == 0:
                     done.set()
@@ -69,9 +74,10 @@ def _send_round(keys: Sequence[Hashable], params_of: Callable[[Hashable], Params
 
     for key in keys:
         task_id = tgw.GetTaskID()
-        for name, value in params_of(key):
+        params = list(params_of(key))
+        for name, value in params:
             tgw.SetThirdInfoParam(task_id, name, value)
-        tgw.QueryThirdInfo(task_id, query_spi=on_response(key))
+        tgw.QueryThirdInfo(task_id, query_spi=on_response(key, task_id, dict(params).get("function_id")))
     done.wait()
     return failed
 
@@ -88,12 +94,12 @@ def fetch_each(keys: Iterable[Hashable], params_of: Callable[[Hashable], Params]
     for start in range(0, len(keys), batch_len):
         batch = keys[start:start + batch_len]
         frames = {k: pd.DataFrame([]) for k in batch}
-        failed = _send_round(batch, params_of, frames)
+        failed = _send_round(batch, params_of, frames, max_attempts=retry_times + 1)
         for i in range(retry_times):
             if not failed:
                 break
             print("retry ", str(i))
-            failed = _send_round(list(failed), params_of, frames)
+            failed = _send_round(list(failed), params_of, frames, attempt=i + 2, max_attempts=retry_times + 1)
         if failed:
             raise Exception(QUERY_FAILED)
         result.update(frames)
@@ -106,4 +112,8 @@ def fetch_one(params: Params) -> pd.DataFrame:
     task_id = tgw.GetTaskID()
     for name, value in params:
         tgw.SetThirdInfoParam(task_id, name, value)
-    return tgw.QueryThirdInfo(task_id)[0]
+    data, status = tgw.QueryThirdInfo(task_id)
+    if is_failed(status):
+        emit_failure("query_failed", method="QueryThirdInfo", task_id=task_id,
+                     function_id=dict(params).get("function_id"), status=status, attempt=1, max_attempts=1)
+    return data

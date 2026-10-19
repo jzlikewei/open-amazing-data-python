@@ -19,6 +19,7 @@ from tgwpy.compat import tgw_module as tgw
 
 from ._codes import full_code, split_code
 from ._gateway import is_failed
+from ._diagnostics import emit_failure, request_context
 from .security_type import is_security_type
 from .constant import (Kline, Period, Snapshot, SnapshotFuture, SnapshotHKT,
                        SnapshotIndex, SnapshotOption)
@@ -350,7 +351,7 @@ def _snapshot_request(market: int, security_code: str, date: int,
 # --------------------------------------------------------------------------
 
 
-def _send_round(requests: list, query, keep) -> list:
+def _send_round(requests: list, query, keep, *, attempt: int = 1) -> list:
     """发一批请求，等齐回包，回包交给 `keep` 收，返回失败的请求。
 
     `keep(req, data)` 在锁内调用：K 线把每张表追加到代码名下，快照把表
@@ -369,6 +370,9 @@ def _send_round(requests: list, query, keep) -> list:
                     keep(req, data)
                 if is_failed(status):
                     failed.append(req)
+                    emit_failure("query_failed", method=getattr(query, "__name__", "market"),
+                                 attempt=attempt, max_attempts=RETRY_TIMES + 1, status=status,
+                                 **request_context(req))
                 left[0] -= 1
                 if left[0] == 0:
                     done.set()
@@ -391,7 +395,7 @@ def _send_batch(requests: list, query, keep) -> None:
         if not failed:
             break
         print("retry ", str(i))
-        failed = _send_round(failed, query, keep)
+        failed = _send_round(failed, query, keep, attempt=i + 2)
     if failed:
         raise Exception("查询失败")
 
