@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import pytest
+from tgwpy.status import DataEmpty
 from open_harness import open_sdk, request_params
 
 FUND_SHARE_FID = "A010090002"
@@ -42,7 +43,7 @@ class _Paged:
         count = int(request.get("count", 1000))
         self.pages.append((int(request.get("offset", 0)), count))
         page = self.data[offset:offset + count]
-        return (page, 0) if page else (None, "status=-100")
+        return (page, 0) if page else (None, DataEmpty())
 
 
 @pytest.mark.parametrize("total", [999, 1000, 2500])

@@ -414,6 +414,7 @@ class MarketData:
 
     def __init__(self, calendar):
         self.calendar = calendar
+        self.last_kline_report = None
 
     def query_snapshot(self, code_list, begin_date, end_date, **kwargs):
         """历史 level-1 快照，返回 `{日期: {代码: DataFrame}}`。
@@ -455,6 +456,10 @@ class MarketData:
         begin_time, end_time = _time_span(kwargs)
         with _QUERY_LOCK:
             days = [d for d in self.calendar if begin_date <= d <= end_date]
+            if period == Period.day.value and days:
+                from ._kline_recovery import query_daily
+                return query_daily(self, code_list, days, period, begin_time, end_time)
+            self.last_kline_report = None
             # 周期不在表里时厂商的窗口长度是 None，`range` 直接抛 TypeError。
             window = KLINE_WINDOW.get(period)
             windows = [days[i:i + window] for i in range(0, len(days), window)]

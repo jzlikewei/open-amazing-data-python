@@ -659,9 +659,9 @@ def _error_frame(task_id: int, status: int, msg: str = "") -> bytes:
     return wire_frame(env)
 
 
-@pytest.mark.parametrize("status,counted", [(-100, False), (-89, False), (-82, True)])
+@pytest.mark.parametrize("status,counted", [(-100, True), (-89, False), (-82, True)])
 def test_U3_只有真失败才进停手计数(transport, status, counted):
-    """-100 是「没数据」，-89 由调用方重试；两者都不该把整轮推向退出码 5。"""
+    """裸 -100 仍是未知错误；只有带 DataEmpty tag 的空信封免于停手计数。"""
     rec = arm(77)
     transport.send(b"q")
     transport.gate.record_failure("之前的一次失败")
@@ -684,3 +684,19 @@ def test_U3_有msg时错误文本仍带status(transport):
     transport.client._ws.feed(_error_frame(78, -89, msg="行情服务错误"))
     _data, text = rec.wait()
     assert "行情服务错误" in text and "status=-89" in text
+
+
+@pytest.mark.parametrize("partial", [False, True])
+def test_typed_empty_survives_wire_and_partial_response_is_not_empty(transport, partial):
+    from tgwpy.status import DataEmpty, GatewayStatus
+    rec = arm(79)
+    transport.send(b"q")
+    transport.gate.record_failure("prior")
+    if partial:
+        transport.pending[79] = ["unfinished"]
+    transport.client._ws.feed(wire_frame({"headers": {"id": 79, "tag": "DataEmpty"},
+                                         "status": -100, "data": ""}))
+    data, status = rec.wait()
+    assert data is None and isinstance(status, GatewayStatus)
+    assert isinstance(status, DataEmpty) == (not partial)
+    assert transport.gate.failures == (2 if partial else 0)

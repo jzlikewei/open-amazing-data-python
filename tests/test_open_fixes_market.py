@@ -44,7 +44,8 @@ def market_reply(request):
     """行情族的夹具：K 线与快照各回一行，别的接口没有。"""
     params = request_params(request)
     if request.get("method") == "ReqGetKline":
-        return [kline_row(params["security_code"], FIRST_DAY)], 0
+        return [kline_row(params["security_code"], day) for day in CALENDAR
+                if int(params["begin_date"]) <= day <= int(params["end_date"])], 0
     if request.get("method") == "ReqGetSnapshot":
         return [snapshot_row(params["security_code"], FIRST_DAY)], 0
     return None

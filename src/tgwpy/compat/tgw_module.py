@@ -665,8 +665,8 @@ def deliver_response(task_id: int, data, status=None) -> None:
 
 
 def _is_empty_status(status) -> bool:
-    text = str(status)
-    return "-100" in text or "DataEmpty" in text
+    from tgwpy.status import DataEmpty
+    return isinstance(status, DataEmpty)
 
 
 def _next_page(task: _Task, data, status) -> tuple[Any, Any, bool]:
@@ -1024,6 +1024,8 @@ def _run_market_query(name: str, task_id: int, build_wire, build_result,
     if waiter is None:
         return True, None
     data, status = waiter.wait(MARKET_TIMEOUT)
+    if _is_empty_status(status):
+        return None, status
     if data is None:
         # data 为空一定是失败：整形失败、任务取消，或等超时。
         # status 可能是字符串（业务层的记错分支，已经过 explain_status 整形），

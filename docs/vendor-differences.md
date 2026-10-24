@@ -84,3 +84,11 @@
 - 涉及：`InfoData.get_index_weight`、`InfoData.get_industry_weight`
 - 厂商 1.1.15：`begin_date` 晚于 `end_date` 时日期窗口切出空列表，一个请求也不发，随后等待回包的那句没有任何回调能唤醒，调用永不返回（实测 280 秒超时）。
 - OpenAmazingData：不发请求，返回空表。
+
+### V12 日线区间响应丢数时有界补查并保留缺口
+- 2026-10-23 串行只读复现：同一证券在起点无成交的窗口返回 `status=-100, tag=DataEmpty`，缩小到后续日期有数据；更宽窗口成功但漏掉尾部。原因只能定位到上游区间响应，不推断服务端内部算法。
+- `MarketData.query_kline` 的日线按调用方提供的交易日历检查缺日，逐日补查缺失日期。完整窗口只发原请求；额外查询与重试共用 `TGW_KLINE_MAX_RECOVERY_REQUESTS`（默认 64）上限。分钟与周/月/季/年周期不套用逐日完整性规则。
+- 只有 `status=-100`、`tag=DataEmpty`、空载荷且无未完成分包的信封成为 typed `DataEmpty`。裸 -100、权限、限流、网络故障均不能冒充空结果。快照空响应仍按失败处理，不能推断停牌。
+- 单日仍空保留 `None` / 缺日，不补 OHLC、不沿用前收。`last_kline_report` 记录交易日、已返回日、空响应日、未解决日、请求数；`complete` 只在日线逐日齐全时为真。stderr 同时记录 `kline_coverage_gap`，原 JSON 结构不变；调用方仍须验证无成交快照并执行 coverage fail-closed。
+- 真实错误或预算耗尽仍抛 `Exception('查询失败')`；附加 `partial_results`（未复权原始结果，仅用于审计）与 `coverage`，不让 CLI 输出部分成功 JSON。网关停手仍为 `ServerUnavailable` / 退出码 5。qfq/hfq 对恢复出的全部真实行照常执行因子完整性检查。
+- 合成回归覆盖起点空、静默漏尾、全空、单日真实错误、混合代码、去重排序、冲突、全调用预算和复权缺口。等价门禁 `truncated` 场景只登记 `result/requests` 差异；原完整行情场景保持一致。
